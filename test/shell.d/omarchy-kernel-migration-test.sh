@@ -133,6 +133,14 @@ TEST_ARCH=aarch64 run_migration
 assert_skipped
 pass "ARM systems cannot receive an x86_64 kernel"
 
+# GRUB and systemd-boot machines have no limine-mkinitcpio to rebuild with.
+reset_fixture
+mv "$scratch/bin/limine-mkinitcpio" "$scratch/limine-mkinitcpio"
+run_migration || fail "systems without Limine skip the migration" "$(<"$scratch/output")"
+mv "$scratch/limine-mkinitcpio" "$scratch/bin/limine-mkinitcpio"
+assert_skipped
+pass "systems that do not boot with Limine keep their kernel and boot setup"
+
 reset_fixture
 printf '%s\n' linux-omarchy-ptl-novrr-mm > "$INSTALLED_PACKAGES"
 mkdir -p "$scratch/state" "$scratch/user-markers" "$scratch/omarchy/migrations"

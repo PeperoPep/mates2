@@ -8,6 +8,12 @@ if omarchy-pkg-present linux-t2 || [[ ${running_kernel,,} == *-t2* ]]; then
   exit 0
 fi
 
+# GRUB and systemd-boot installs have no Limine boot entries to rebuild.
+if ! omarchy-cmd-present limine-mkinitcpio; then
+  echo "This machine does not boot with Limine; leaving its kernel alone"
+  exit 0
+fi
+
 limine_conf="${OMARCHY_KERNEL_LIMINE_CONF:-/etc/default/limine}"
 rebuild_marker="${OMARCHY_KERNEL_REBUILD_MARKER:-/var/lib/omarchy/migrations/1789325478}"
 kernel="linux-omarchy"
