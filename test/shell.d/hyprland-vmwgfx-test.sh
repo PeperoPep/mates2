@@ -9,6 +9,17 @@ require_command lua
 tmp_dir=$(mktemp -d)
 trap 'rm -rf "$tmp_dir"' EXIT
 
+# The module forks the detector and the host layout helper through
+# OMARCHY_PATH. Point it at a root whose default/ is the real one and whose
+# bin/ carries the real detector beside a layout helper that reports no host
+# monitors, so no modetest runs against the machine the test is on.
+scratch_root="$tmp_dir/root"
+mkdir -p "$scratch_root/bin"
+ln -s "$ROOT/default" "$scratch_root/default"
+ln -s "$ROOT/bin/omarchy-hw-vmwgfx" "$scratch_root/bin/omarchy-hw-vmwgfx"
+printf '#!/bin/bash\n' >"$scratch_root/bin/omarchy-hyprland-monitor-vmwgfx-layout"
+chmod +x "$scratch_root/bin/omarchy-hyprland-monitor-vmwgfx-layout"
+
 # A driver and what it has bound, in sysfs's own shape: "<driver>@<slot>@<card>"
 # has a display, "<driver>@<slot>" does not.
 write_pci_drivers() {
@@ -38,7 +49,7 @@ write_pci_drivers() {
 # Loads only the vmwgfx module under a recording hl: env calls print as they
 # happen, so an env line before "start" would be a parse-time call.
 run_vmwgfx_module() {
-  HOME="$tmp_dir/home" OMARCHY_PATH="$ROOT" OMARCHY_PCI_DRIVERS_PATH="$tmp_dir/drivers" lua <<'LUA'
+  HOME="$tmp_dir/home" OMARCHY_PATH="$scratch_root" OMARCHY_PCI_DRIVERS_PATH="$tmp_dir/drivers" lua <<'LUA'
 package.path = os.getenv("OMARCHY_PATH") .. "/?.lua;" .. package.path
 
 local start_handlers = {}
@@ -48,8 +59,18 @@ hl = {
     print("env\t" .. name .. "=" .. value)
   end,
   on = function(event, callback)
-    assert(event == "hyprland.start", "unexpected event: " .. tostring(event))
-    table.insert(start_handlers, callback)
+    if event == "hyprland.start" then
+      table.insert(start_handlers, callback)
+    end
+  end,
+  exec_cmd = function(command)
+    print("exec\t" .. command)
+  end,
+  monitor = function() end,
+  dispatch = function() end,
+  timer = function() end,
+  get_monitors = function()
+    return {}
   end,
 }
 
@@ -67,7 +88,7 @@ LUA
 # hyprland-default-config-test.sh, then fires the collected start handlers in
 # registration order, the way Hyprland does.
 run_omarchy_config() {
-  HOME="$tmp_dir/home" XDG_CONFIG_HOME="$tmp_dir/home/.config" XDG_STATE_HOME="$tmp_dir/home/.local/state" OMARCHY_PATH="$ROOT" OMARCHY_PCI_DRIVERS_PATH="$tmp_dir/drivers" lua <<'LUA'
+  HOME="$tmp_dir/home" XDG_CONFIG_HOME="$tmp_dir/home/.config" XDG_STATE_HOME="$tmp_dir/home/.local/state" OMARCHY_PATH="$scratch_root" OMARCHY_PCI_DRIVERS_PATH="$tmp_dir/drivers" lua <<'LUA'
 package.path = os.getenv("HOME") .. "/.config/?.lua;" .. os.getenv("OMARCHY_PATH") .. "/?.lua;" .. package.path
 
 local function proxy()
@@ -130,10 +151,11 @@ LUA
 
 mkdir -p "$tmp_dir/home"
 
-# vmwgfx driving the display, as in a VMware or VirtualBox VMSVGA guest.
+# vmwgfx driving the display, as in a VMware or VirtualBox VMSVGA guest. Two
+# start handlers: this variable, and the watcher the layout section launches.
 write_pci_drivers vmwgfx@0000:00:0f.0@card0
 output=$(run_vmwgfx_module)
-expected=$'start\t1\nenv\tLIBGL_ALWAYS_SOFTWARE=1'
+expected=$'start\t2\nenv\tLIBGL_ALWAYS_SOFTWARE=1\nexec\tuwsm-app -- omarchy-hyprland-monitor-vmwgfx-sync'
 [[ $output == "$expected" ]] ||
   fail "a vmwgfx guest sets LIBGL_ALWAYS_SOFTWARE from the start handler only" "$output"
 pass "a vmwgfx guest sets LIBGL_ALWAYS_SOFTWARE from the start handler only"
