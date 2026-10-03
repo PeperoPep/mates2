@@ -59,6 +59,28 @@ safe_stage_path() {
   [[ $suffix =~ ^[[:alnum:]]{6}$ ]]
 }
 
+clean_stale_rtc_alarm() {
+  local rtc_alarm_drop_in="/etc/limine-entry-tool.d/rtc-alarm.conf"
+  if sudo test -f "$rtc_alarm_drop_in"; then
+    local file_hash
+    file_hash=$(sudo sha256sum "$rtc_alarm_drop_in" 2>/dev/null | awk '{print $1}')
+    local expected_hash="c9469cd9ba4c0f74f8ce6fe4afeac4414741a3536ce8693838047f15487fd1c8"
+    if [[ -n $file_hash && $file_hash == "$expected_hash" ]]; then
+      echo "Removing stale ACPI RTC alarm drop-in ($rtc_alarm_drop_in)"
+      if sudo rm -f -- "$rtc_alarm_drop_in"; then
+        local rebuild_marker="$1"
+        if [[ -f $rebuild_marker ]] && grep -q "^HOOKS+=(resume)$" "$rebuild_marker" && ! $NO_REBUILD; then
+          if ! sudo limine-mkinitcpio; then
+            echo "Warning: Failed to rebuild boot entries after removing stale RTC drop-in" >&2
+            return 1
+          fi
+        fi
+      fi
+    fi
+  fi
+  return 0
+}
+
 # Check if hibernation is already configured
 if [[ -f $MKINITCPIO_CONF ]] && grep -q "^HOOKS+=(resume)$" "$MKINITCPIO_CONF"; then
   # Fix empty resume_offset if btrfs map-swapfile failed during initial setup
@@ -72,6 +94,9 @@ if [[ -f $MKINITCPIO_CONF ]] && grep -q "^HOOKS+=(resume)$" "$MKINITCPIO_CONF"; 
       fi
     fi
   fi
+
+  clean_stale_rtc_alarm "$MKINITCPIO_CONF" || exit 1
+
   echo "Hibernation is already set up"
   exit 0
 fi
@@ -82,6 +107,8 @@ if ! $FORCE; then
     exit 0
   fi
 fi
+
+clean_stale_rtc_alarm "$MKINITCPIO_CONF" || exit 1
 
 SWAP_SUBVOLUME="/swap"
 
