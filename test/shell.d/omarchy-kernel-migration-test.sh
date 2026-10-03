@@ -7,7 +7,20 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 migration="$ROOT/migrations/1789325478.sh"
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
-mkdir -p "$scratch/bin" "$scratch/drop-ins"
+mkdir -p "$scratch/bin" "$scratch/drop-ins" "$scratch/boot" "$scratch/host-bin"
+
+# A copy of the host PATH without limine-mkinitcpio, so the non-Limine cases
+# cannot pick up a real one installed on the machine running the tests.
+IFS=: read -ra host_path <<< "$PATH"
+for dir in "${host_path[@]}"; do
+  [[ -d $dir ]] || continue
+  for cmd in "$dir"/*; do
+    name=${cmd##*/}
+    [[ -x $cmd && ! -d $cmd && $name != "limine-mkinitcpio" && ! -e $scratch/host-bin/$name ]] || continue
+    ln -s "$cmd" "$scratch/host-bin/$name"
+  done
+done
+without_limine_path="$scratch/bin:$ROOT/bin:$scratch/host-bin"
 
 export PATH="$scratch/bin:$ROOT/bin:$PATH"
 export CALL_LOG="$scratch/calls"
@@ -15,6 +28,7 @@ export INSTALLED_PACKAGES="$scratch/packages"
 export OMARCHY_KERNEL_LIMINE_CONF="$scratch/limine"
 export OMARCHY_KERNEL_LIMINE_DROP_INS="$scratch/drop-ins"
 export OMARCHY_KERNEL_REBUILD_MARKER="$scratch/state/1789325478"
+export OMARCHY_KERNEL_LIMINE_BOOT_CONF="$scratch/boot/limine.conf"
 kernel="linux-omarchy"
 boot_order='BOOT_ORDER="linux-omarchy, linux-omarchy-*, *, *fallback, Snapshots"'
 
@@ -38,6 +52,9 @@ cat > "$scratch/bin/sudo" <<'SH'
 #!/bin/bash
 printf 'sudo %s\n' "$*" >> "$CALL_LOG"
 case "$1" in
+  -v) [[ ${SUDO_VALIDATE_FAIL:-0} == "0" ]] ;;
+  test) [[ ${SUDO_TEST_FAIL:-0} == "0" ]] && exec "$@" ;;
+  bash) [[ ${SUDO_COMMAND_FAIL:-0} == "0" ]] && exec "$@" ;;
   pacman | mkdir | touch | sed | tee | install | limine-mkinitcpio | limine-entry-tool) exec "$@" ;;
   *) exit 99 ;;
 esac
@@ -88,6 +105,7 @@ BOOT_ORDER="*, *fallback, Snapshots"
 ENABLE_UKI=yes
 CONF
   cp "$OMARCHY_KERNEL_LIMINE_CONF" "$scratch/original-limine"
+  printf '%s\n' 'timeout: 3' > "$OMARCHY_KERNEL_LIMINE_BOOT_CONF"
 }
 
 run_migration() {
@@ -99,7 +117,10 @@ assert_preferred() {
 }
 
 assert_skipped() {
-  [[ ! -s $CALL_LOG ]] || fail "excluded systems do not change" "$(<"$CALL_LOG")"
+  # Checking for the Limine boot config as root is the only allowed call.
+  local changes
+  changes=$(grep -Fv 'sudo bash -c ' "$CALL_LOG" || true)
+  [[ -z $changes ]] || fail "excluded systems do not change" "$changes"
   cmp -s "$OMARCHY_KERNEL_LIMINE_CONF" "$scratch/original-limine" || fail "excluded systems keep their boot settings"
   [[ ! -e $OMARCHY_KERNEL_REBUILD_MARKER ]] || fail "excluded systems do not get a completion marker"
 }
@@ -134,12 +155,39 @@ assert_skipped
 pass "ARM systems cannot receive an x86_64 kernel"
 
 # GRUB and systemd-boot machines have no limine-mkinitcpio to rebuild with.
+# Run without the host PATH's copy so a real one cannot leak into the case.
 reset_fixture
 mv "$scratch/bin/limine-mkinitcpio" "$scratch/limine-mkinitcpio"
-run_migration || fail "systems without Limine skip the migration" "$(<"$scratch/output")"
+PATH=$without_limine_path run_migration || fail "systems without Limine skip the migration" "$(<"$scratch/output")"
 mv "$scratch/limine-mkinitcpio" "$scratch/bin/limine-mkinitcpio"
 assert_skipped
-pass "systems that do not boot with Limine keep their kernel and boot setup"
+grep -Fq "does not boot with Limine" "$scratch/output" || fail "the skip is explained" "$(<"$scratch/output")"
+pass "systems without limine-mkinitcpio keep their kernel and boot setup"
+
+# limine-mkinitcpio alone does not mean the machine boots with Limine.
+reset_fixture
+rm "$OMARCHY_KERNEL_LIMINE_BOOT_CONF"
+run_migration || fail "systems without a Limine boot config skip the migration" "$(<"$scratch/output")"
+assert_skipped
+grep -Fq "$OMARCHY_KERNEL_LIMINE_BOOT_CONF" "$CALL_LOG" || fail "the boot config is checked as root"
+grep -Fq "does not boot with Limine" "$scratch/output" || fail "the skip is explained" "$(<"$scratch/output")"
+pass "systems with limine-mkinitcpio but no Limine boot config keep their kernel and boot setup"
+
+# Passwordless command access must not be rejected by sudo's separate
+# credential-validation policy.
+reset_fixture
+SUDO_VALIDATE_FAIL=1 run_migration || fail "passwordless sudo must not require separate credential validation" "$(<"$scratch/output")"
+[[ -f $OMARCHY_KERNEL_REBUILD_MARKER ]] || fail "passwordless sudo completes the migration"
+! grep -Fxq 'sudo -v' "$CALL_LOG" || fail "the migration must not run sudo -v"
+pass "passwordless sudo can run the migration when sudo -v is denied"
+
+# A denied privileged boot-config check must not be mistaken for a missing one.
+reset_fixture
+if SUDO_TEST_FAIL=1 SUDO_COMMAND_FAIL=1 run_migration; then
+  fail "a failed privileged check must fail the migration instead of skipping it"
+fi
+assert_skipped
+pass "a failed privileged boot-config check leaves the migration pending"
 
 reset_fixture
 printf '%s\n' linux-omarchy-ptl-novrr-mm > "$INSTALLED_PACKAGES"
