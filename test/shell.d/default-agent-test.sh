@@ -56,6 +56,11 @@ cat >"$mock_bin/opencode" <<'SH'
 printf '%s\0' opencode "$@" >"$OMARCHY_TEST_AGENT_INLINE_LOG"
 SH
 
+cat >"$mock_bin/afk" <<'SH'
+#!/bin/bash
+printf '%s\0' afk "$@" >"$OMARCHY_TEST_AGENT_INLINE_LOG"
+SH
+
 cat >"$mock_bin/omarchy-mise-install" <<'SH'
 #!/bin/bash
 printf '%s\n' "$*" >>"$OMARCHY_TEST_STUB_LOG"
@@ -176,6 +181,14 @@ grep -Fx "$cursor_agent_package" "$stub_log" >/dev/null && fail "user setup repl
 pass "user setup keeps an existing Cursor CLI install"
 grep -Fx "$muse_package muse" "$stub_log" >/dev/null && fail "user setup replaces an existing Muse command"
 
+printf '#!/bin/bash\necho user-afk\n' >"$test_home/.local/bin/afk"
+chmod +x "$test_home/.local/bin/afk"
+: >"$stub_log"
+source "$ROOT/install/user/mise.sh"
+[[ $("$test_home/.local/bin/afk") == "user-afk" ]] || fail "user setup replaces a user-managed AFK command"
+grep -Fx "$afk_package afk" "$stub_log" >/dev/null && fail "user setup provisions over a user-managed AFK command"
+pass "user setup keeps a user-managed AFK command"
+
 : >"$stub_log"
 OMARCHY_TEST_MISSING_COMMAND=muse source "$ROOT/migrations/1788724825.sh" >/dev/null
 grep -Fx "$muse_package muse" "$stub_log" >/dev/null || fail "Muse migration creates its lazy stub"
@@ -200,7 +213,13 @@ grep -Fx "$ori_package ori" "$stub_log" >/dev/null || fail "Ori migration create
 
 : >"$stub_log"
 source "$ROOT/migrations/1787709254.sh" >/dev/null
+[[ $("$test_home/.local/bin/afk") == "user-afk" ]] || fail "AFK migration replaces a user-managed command"
+[[ ! -s $stub_log ]] || fail "AFK migration provisions over a user-managed command"
+rm -f "$test_home/.local/bin/afk"
+OMARCHY_TEST_MISSING_COMMAND=afk source "$ROOT/migrations/1787709254.sh" >/dev/null
+unset OMARCHY_TEST_MISSING_COMMAND
 grep -Fx "$afk_package afk" "$stub_log" >/dev/null || fail "AFK migration creates a working lazy stub"
+pass "AFK migration preserves user-managed commands"
 
 : >"$stub_log"
 export OMARCHY_TEST_MISSING_COMMAND=cursor-agent
@@ -450,6 +469,13 @@ omarchy-remove-preinstalls >/dev/null
 rm "$test_home/.local/bin/muse"
 pass "Remove Preinstalls keeps a user-managed Muse install"
 
+printf '#!/bin/bash\necho user-afk\n' >"$test_home/.local/bin/afk"
+chmod +x "$test_home/.local/bin/afk"
+omarchy-remove-preinstalls >/dev/null
+[[ $("$test_home/.local/bin/afk") == "user-afk" ]] || fail "Remove Preinstalls deletes a user-managed AFK"
+rm "$test_home/.local/bin/afk"
+pass "Remove Preinstalls keeps a user-managed AFK install"
+
 
 [[ -z $(omarchy-default-agent) ]] || fail "default agent is unset until one is chosen"
 pass "default agent is unset until one is chosen"
@@ -492,6 +518,7 @@ chmod +x "$mock_bin/omarchy-agent"
 hash -r
 
 declare -A expected_agents=(
+  [afk]="afk"
   [pi]="pi"
   [omp]="omp"
   [oh-my-pi]="omp"
@@ -519,6 +546,7 @@ declare -A expected_agents=(
 )
 
 declare -A expected_packages=(
+  [afk]="$afk_package"
   [pi]="pi"
   [omp]="$omp_package"
   [opencode]="opencode"
@@ -799,6 +827,25 @@ assert_launch hermes env -u HERMES_SESSION_SOURCE hermes chat --yolo --tui "--qu
 assert_launch agy agy --dangerously-skip-permissions --prompt-interactive "Review this project"
 assert_launch copilot copilot --allow-all --interactive "Review this project"
 pass "agent launcher adapts initial prompts for every supported agent"
+
+printf '%s\n' "afk" >"$agent_file"
+: >"$inline_log"
+omarchy-agent
+mapfile -d '' -t afk_args <"$inline_log"
+[[ ${afk_args[*]} == "afk open --project $PWD" ]] || fail "bare AFK launch hands the project to the browser flow"
+
+: >"$inline_log"
+omarchy-agent --inline
+mapfile -d '' -t afk_args <"$inline_log"
+[[ ${afk_args[*]} == "afk open --project $PWD" ]] || fail "inline AFK launch hands the project to the browser flow"
+
+: >"$inline_log"
+omarchy-agent-prompt "Review this project"
+mapfile -d '' -t afk_args <"$inline_log"
+[[ ${#afk_args[@]} == 5 && ${afk_args[0]} == "afk" && ${afk_args[1]} == "open" &&
+  ${afk_args[2]} == "--project" && ${afk_args[3]} == "$PWD" && ${afk_args[4]} == "Review this project" ]] ||
+  fail "prompted AFK launch hands one literal task to the browser flow"
+pass "AFK launches bare, inline, and prompted through its browser flow"
 
 literal_muse_prompt=$'--disable-sandbox !Crash {$(touch must-not-run)}\ntrailing\\ '
 printf '%s\n' "muse" >"$agent_file"

@@ -234,6 +234,7 @@ assertEqual(
   'menu lists Reset Computer last under Setup'
 )
 const expectedAgents = {
+  afk: { icon: '\ue90e', iconFont: 'omarchy', label: 'AFK' },
   agy: { icon: '󰫢', label: 'Antigravity' },
   pi: { icon: '\ue901', iconFont: 'omarchy', label: 'Pi' },
   omp: { icon: '\ue903', iconFont: 'omarchy', label: 'omp' },
@@ -269,6 +270,11 @@ assertDeepEqual(
     .map(item => item.label),
   ['AFK', 'Antigravity', 'Claude', 'Codex', 'Copilot', 'Crush', 'Cursor CLI', 'Grok', 'Hermes', 'Muse Code', 'omp', 'OpenClaw', 'OpenCode', 'Ori', 'Pi'],
   'menu sorts coding agents alphabetically'
+)
+const claudeDesktopEntries = ['install.ai.claude', 'remove.ai.claude'].map(id => defaultById[id])
+assert(
+  claudeDesktopEntries.every(entry => entry && entry.icon === '󰛄' && entry.iconFont === ''),
+  'menu keeps Claude Desktop entries on the Claude glyph'
 )
 const expectedDefaults = {
   browser: ['Chromium', 'Chrome', 'Brave', 'Brave Origin', 'Edge', 'Firefox', 'Zen'],
