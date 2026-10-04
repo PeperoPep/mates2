@@ -7,13 +7,21 @@ omarchy-hw-n1x || return 0
 
 echo "Detected NVIDIA N1x platform, applying bring-up configuration..."
 
-# The ISO installs linux-n1x through archinstall's kernels list; make sure the
-# headers for DKMS are present and the stock kernel is gone so Limine shows a
-# single kernel.
-omarchy-pkg-add linux-n1x linux-n1x-headers
-pacman -Rdd --noconfirm linux linux-headers 2>/dev/null || true
+# linux-omarchy-n1x is Omarchy's kernel with NVIDIA's N1x patches (embedded
+# controller, audio, GPU IOMMU, the MediaTek I2C behind the keyboard and
+# touchpad). The ISO installs it through archinstall's kernels list; make sure
+# the headers for DKMS are present, and that the stock kernel and NVIDIA's
+# older 7.0-based linux-n1x are gone so Limine shows a single kernel.
+n1x_kernel=linux-omarchy-n1x
+omarchy-pkg-add "$n1x_kernel" "$n1x_kernel-headers"
+# pacman -R refuses the whole transaction when any target is missing, so only
+# name the ones that are installed.
+mapfile -t n1x_stray_kernels < <(pacman -Qq linux linux-headers linux-n1x linux-n1x-headers 2>/dev/null || true)
+if (( ${#n1x_stray_kernels[@]} )); then
+  pacman -Rdd --noconfirm "${n1x_stray_kernels[@]}"
+fi
 if pacman -Qq linux &>/dev/null; then
-  echo "WARNING: stock linux kernel still installed alongside linux-n1x:"
+  echo "WARNING: stock linux kernel still installed alongside $n1x_kernel:"
   pacman -Qi linux | grep -i "required by"
 fi
 
@@ -32,6 +40,27 @@ cat > /etc/limine-entry-tool.d/00-omarchy-n1x-console.conf <<'CONF'
 KERNEL_CMDLINE[default]+=" console=tty0 acpi=nospcr"
 CONF
 
+# The firmware's deep sleep returns at once: PSCI SYSTEM_SUSPEND comes straight
+# back without the machine sleeping (Dell BIOS 1.0.4 and 1.2.0), and resume
+# then stalls for a minute. Suspend to idle sleeps and wakes on the keyboard,
+# lid and power button, so make it the default.
+cat > /etc/limine-entry-tool.d/00-omarchy-n1x-sleep.conf <<'CONF'
+# N1x: the firmware's deep sleep does not sleep; suspend to idle instead. See
+# install/hardware/n1x.sh.
+KERNEL_CMDLINE[default]+=" mem_sleep_default=s2idle"
+CONF
+
+# USB4 and Thunderbolt: linux-omarchy-n1x drives the N1x's USB4 host routers
+# (thunderbolt_platform), but only when power_wrap keeps the USB4 resources it
+# otherwise releases once USB is up, after which the SSPM stops answering for
+# the routers. The firmware leaves the tunnel root ports unconfigured, so they
+# need bus numbers set aside for a dock (0x20, as tested with a CalDigit TS4).
+cat > /etc/limine-entry-tool.d/00-omarchy-n1x-usb4.conf <<'CONF'
+# N1x: keep USB4 powered for the Thunderbolt connection manager, and leave bus
+# numbers for docks. See install/hardware/n1x.sh.
+KERNEL_CMDLINE[default]+=" power_wrap_drv.usb4_release=0 pci=hpbussize=0x20"
+CONF
+
 # Rescue entry: same kernel and initramfs, NVIDIA blacklisted, multi-user
 # target, console on the panel. Limine passes an entry's cmdline as EFI load
 # options and systemd-stub prefers those over the UKI's embedded cmdline, so
@@ -41,38 +70,43 @@ if [[ -z $root_cmdline || $root_cmdline != *root=* ]]; then
   echo "Error: /etc/kernel/cmdline has no root= (Limine defaults not written yet)" >&2
   return 1
 fi
-rescue_cmdline="$root_cmdline omarchy.n1x_recovery=1 acpi=nospcr plymouth.enable=0 nomodeset module_blacklist=nvidia,nvidia_drm,nvidia_modeset,nvidia_uvm,nvidia_peermem,nouveau modprobe.blacklist=nvidia,nvidia_drm,nvidia_modeset,nvidia_uvm,nvidia_peermem,nouveau nvidia_drm.modeset=0 systemd.unit=multi-user.target console=tty0 fbcon=map:0 loglevel=7 ignore_loglevel systemd.show_status=1 systemd.log_target=console udev.log_level=debug vt.global_cursor_default=1"
+rescue_cmdline="$root_cmdline initramfs_async=0 omarchy.n1x_recovery=1 acpi=nospcr plymouth.enable=0 nomodeset module_blacklist=nvidia,nvidia_drm,nvidia_modeset,nvidia_uvm,nvidia_peermem,nouveau modprobe.blacklist=nvidia,nvidia_drm,nvidia_modeset,nvidia_uvm,nvidia_peermem,nouveau nvidia_drm.modeset=0 systemd.unit=multi-user.target console=tty0 fbcon=map:0 loglevel=7 ignore_loglevel systemd.show_status=1 systemd.log_target=console udev.log_level=debug vt.global_cursor_default=1"
 printf '%s\n' \
   '# N1x bring-up: the rescue entry sits right below the normal one.' \
-  "KERNEL_CMDLINE[linux-n1x-rescue]=\"$rescue_cmdline\"" \
-  'BOOT_ORDER="linux-n1x, linux-n1x-rescue, *fallback, *, Snapshots"' \
+  "KERNEL_CMDLINE[$n1x_kernel-rescue]=\"$rescue_cmdline\"" \
+  "BOOT_ORDER=\"$n1x_kernel, $n1x_kernel-rescue, *fallback, *, Snapshots\"" \
   > /etc/limine-entry-tool.d/zz-omarchy-n1x-boot-order.conf
 
-# Build the compact rescue UKI from the normal hardware-selected initramfs and
-# register it as a custom entry. --no-hooks: this runs inside the installer's
-# masked-hooks window; the final limine-update owns the normal UKI.
-mapfile -t n1x_pkgbase_files < <(grep -lFx linux-n1x /usr/lib/modules/*/pkgbase 2>/dev/null || true)
-if (( ${#n1x_pkgbase_files[@]} != 1 )); then
-  echo "Error: expected one installed linux-n1x module tree, found ${#n1x_pkgbase_files[@]}" >&2
+# The package's own module tree: after an upgrade, kernel-modules-hook keeps the
+# running kernel's tree until the next boot, so there can be two.
+n1x_kernel_version=$(pacman -Qql "$n1x_kernel" 2>/dev/null | sed -n 's|^/usr/lib/modules/\([^/]*\)/pkgbase$|\1|p')
+if [[ -z $n1x_kernel_version || ! -d /usr/lib/modules/$n1x_kernel_version ]]; then
+  echo "Error: cannot find the installed $n1x_kernel module tree" >&2
   return 1
 fi
-n1x_kernel_version=${n1x_pkgbase_files[0]#/usr/lib/modules/}
-n1x_kernel_version=${n1x_kernel_version%/pkgbase}
-n1x_rescue_cmdline_file=$(mktemp)
-n1x_rescue_uki=$(mktemp --suffix=.efi)
-printf '%s\n' "$rescue_cmdline" > "$n1x_rescue_cmdline_file"
-if ! mkinitcpio --kernel "$n1x_kernel_version" --cmdline "$n1x_rescue_cmdline_file" --uki "$n1x_rescue_uki"; then
-  rm -f "$n1x_rescue_cmdline_file" "$n1x_rescue_uki"
+
+# The rescue entry is its own UKI, built from the normal hardware-selected
+# initramfs, which limine-update never rebuilds. Build it now, and again after
+# every kernel update, so it never boots a kernel whose modules are gone.
+# --no-hooks: this runs inside the installer's masked-hooks window; the final
+# limine-update owns the normal UKI.
+if ! omarchy-refresh-n1x-rescue --no-mutex --no-hooks; then
   echo "Error: failed to build the N1x rescue UKI" >&2
   return 1
 fi
-if ! limine-entry-tool --add-uki linux-n1x-rescue "$n1x_rescue_uki" \
-  --comment "N1x rescue (text console, graphics off)" --overwrite --quiet --no-mutex --no-hooks; then
-  rm -f "$n1x_rescue_cmdline_file" "$n1x_rescue_uki"
-  echo "Error: failed to register the N1x rescue UKI" >&2
-  return 1
-fi
-rm -f "$n1x_rescue_cmdline_file" "$n1x_rescue_uki"
+mkdir -p /etc/pacman.d/hooks
+cat > /etc/pacman.d/hooks/zz-omarchy-n1x-rescue.hook <<HOOK
+[Trigger]
+Type = Package
+Operation = Install
+Operation = Upgrade
+Target = $n1x_kernel
+
+[Action]
+Description = Rebuilding the N1x rescue boot entry...
+When = PostTransaction
+Exec = /usr/bin/omarchy-refresh-n1x-rescue
+HOOK
 
 # GPU policy, decided by the system firmware version.
 #

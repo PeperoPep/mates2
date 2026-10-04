@@ -71,15 +71,21 @@ assert_succeeds bash -n "$n1x" "n1x.sh parses"
 assert_succeeds grep -Fq 'omarchy-hw-n1x || return 0' "$n1x" "n1x.sh is gated on the detector"
 assert_succeeds grep -Fq '/etc/limine-entry-tool.d/00-omarchy-n1x-console.conf' "$n1x" "console drop-in is written"
 assert_succeeds grep -Fq 'KERNEL_CMDLINE[default]+=" console=tty0 acpi=nospcr"' "$n1x" "console fragment pins the panel and leaves the boot quiet"
-assert_succeeds grep -Fq 'KERNEL_CMDLINE[linux-n1x-rescue]=' "$n1x" "rescue entry has its own cmdline key"
-assert_succeeds grep -Fq 'BOOT_ORDER="linux-n1x, linux-n1x-rescue, *fallback, *, Snapshots"' "$n1x" "normal entry boots by default, rescue next"
+assert_succeeds grep -Fqx 'n1x_kernel=linux-omarchy-n1x' "$n1x" "N1x installs run linux-omarchy-n1x"
+assert_succeeds grep -Fq 'KERNEL_CMDLINE[default]+=" mem_sleep_default=s2idle"' "$n1x" "suspend defaults to s2idle, the firmware's deep sleep does not sleep"
+assert_succeeds grep -Fq 'KERNEL_CMDLINE[default]+=" power_wrap_drv.usb4_release=0 pci=hpbussize=0x20"' "$n1x" "USB4 stays powered for the Thunderbolt connection manager"
+assert_succeeds grep -Fq 'pacman -Qq linux linux-headers linux-n1x linux-n1x-headers' "$n1x" "stray kernels are removed only when installed"
+assert_succeeds grep -Fq 'KERNEL_CMDLINE[$n1x_kernel-rescue]=' "$n1x" "rescue entry has its own cmdline key"
+assert_succeeds grep -Fq 'BOOT_ORDER=\"$n1x_kernel, $n1x_kernel-rescue, *fallback, *, Snapshots\"' "$n1x" "normal entry boots by default, rescue next"
 assert_succeeds grep -Fq 'install nvidia_drm /bin/false' "$n1x" "NVIDIA stack blocked against explicit loads on pre-release firmware"
 assert_succeeds grep -Fq 'options nvidia_drm modeset=1 fbdev=1' "$n1x" "GPU drives the panel on firmware >= 1.0"
 assert_succeeds grep -Fq 'initcall_blacklist=simpledrm_platform_driver_init' "$n1x" "firmware framebuffer dropped when the GPU owns the panel"
 assert_succeeds grep -Fq 'MODULES+=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)' "$n1x" "early KMS on firmware >= 1.0"
 assert_succeeds grep -Fq '_omarchy_n1x_hooks+=(omarchy-n1x-boot-brightness)' "$n1x" "panel is lit right after plymouth for the LUKS prompt"
 assert_succeeds grep -Fq "sort -V | head -1) == 1.0.0" "$n1x" "policy keyed on the firmware version"
-assert_succeeds grep -Fq -- '--add-uki linux-n1x-rescue' "$n1x" "rescue UKI is registered"
+assert_succeeds grep -Fq 'omarchy-refresh-n1x-rescue --no-mutex --no-hooks' "$n1x" "rescue UKI is built at install time"
+assert_succeeds grep -Fq 'Exec = /usr/bin/omarchy-refresh-n1x-rescue' "$n1x" "rescue UKI is rebuilt after kernel updates"
+assert_succeeds grep -Fq -- '--add-uki "$kernel-rescue"' "$ROOT/bin/omarchy-refresh-n1x-rescue" "rescue UKI is registered"
 assert_fails grep -Fq 'systemd-networkd.service' "$n1x" "n1x.sh does not fight network.sh over networkd"
 assert_succeeds grep -Fq 'modinfo -k "$n1x_kernel_version" nvidia nvidia_modeset nvidia_uvm nvidia_drm' "$n1x" "early KMS only when DKMS built every early-loaded module"
 assert_fails grep -Eq 'authorized_keys|recovery key|n1x-recovery' "$ROOT/bin/omarchy-n1x-probe" "the probe reports sshd state instead of claiming a key"
@@ -93,4 +99,10 @@ nvidia_line=$(grep -n 'hardware/nvidia.sh' "$all" | cut -d: -f1)
 assert_succeeds grep -Fq 'if omarchy-hw-n1x; then' "$ROOT/install/hardware/nvidia.sh" "nvidia.sh defers to the N1x policy"
 assert_succeeds grep -Fq 'if [[ $(uname -m) == aarch64 ]]; then' "$ROOT/etc/mkinitcpio.conf.d/omarchy_hooks.conf" "initramfs hooks branch on aarch64"
 assert_succeeds grep -Fq 'MODULES+=(i2c_mt65xx i2c_tegra i2c_hid i2c_hid_acpi hid_generic hid_multitouch usbhid)' "$ROOT/etc/mkinitcpio.conf.d/omarchy_hooks.conf" "early I2C-HID input modules on aarch64"
+# Source the hooks file as an aarch64 machine would: Plymouth stays (the N1x
+# boots quietly behind its splash), the x86-only microcode hook goes.
+aarch64_hooks=$(PATH="$tmp_dir/bin:$PATH" bash -c 'MODULES=(); source "$1"; echo "${HOOKS[*]}"' _ "$ROOT/etc/mkinitcpio.conf.d/omarchy_hooks.conf")
+[[ " $aarch64_hooks " == *" plymouth "* && " $aarch64_hooks " != *" microcode "* ]] \
+  && pass "aarch64 initramfs keeps plymouth and drops microcode" \
+  || fail "aarch64 initramfs hooks: $aarch64_hooks"
 

@@ -1,0 +1,51 @@
+#!/bin/bash
+
+# omarchy:summary=Rebuild the N1x rescue boot entry for the installed kernel
+# omarchy:requires-sudo=true
+# omarchy:hidden=true
+
+# The N1x rescue entry (text console, graphics off) is its own UKI, which
+# limine-update does not rebuild. install/hardware/n1x.sh builds it at install
+# time, and a pacman hook reruns this after every kernel update, so the entry
+# never boots a kernel whose modules are gone. Extra arguments go to
+# limine-entry-tool.
+
+set -euo pipefail
+
+kernel=linux-omarchy-n1x
+boot_order=${OMARCHY_N1X_BOOT_ORDER_CONF:-/etc/limine-entry-tool.d/zz-omarchy-n1x-boot-order.conf}
+modules=${OMARCHY_MODULES_DIR:-/usr/lib/modules}
+
+# Not an N1x install: nothing to rebuild.
+[[ -f $boot_order ]] || exit 0
+
+if (( EUID != 0 )); then
+  echo "Error: omarchy-refresh-n1x-rescue must run as root" >&2
+  exit 1
+fi
+
+declare -A KERNEL_CMDLINE
+# shellcheck source=/dev/null
+source "$boot_order"
+cmdline=${KERNEL_CMDLINE[$kernel-rescue]:-}
+if [[ -z $cmdline ]]; then
+  echo "Error: $boot_order has no KERNEL_CMDLINE[$kernel-rescue]" >&2
+  exit 1
+fi
+
+# The package's own module tree: after an upgrade, kernel-modules-hook keeps the
+# running kernel's tree until the next boot, so there can be two.
+version=$(pacman -Qql "$kernel" 2>/dev/null | sed -n 's|^/usr/lib/modules/\([^/]*\)/pkgbase$|\1|p')
+if [[ -z $version || ! -d $modules/$version ]]; then
+  echo "Error: cannot find the installed $kernel module tree" >&2
+  exit 1
+fi
+
+cmdline_file=$(mktemp)
+uki=$(mktemp --suffix=.efi)
+trap 'rm -f "$cmdline_file" "$uki"' EXIT
+printf '%s\n' "$cmdline" >"$cmdline_file"
+
+mkinitcpio --kernel "$version" --cmdline "$cmdline_file" --uki "$uki"
+limine-entry-tool --add-uki "$kernel-rescue" "$uki" \
+  --comment "N1x rescue (text console, graphics off)" --overwrite --quiet "$@"
