@@ -1063,9 +1063,7 @@ Item {
             // evaluated once and cached, since nothing it reads ever changes.
             property double now: Date.now()
             property double expiresAt: Date.now() + cardSlot.lifetime
-            readonly property real remainingLifetime: cardSlot.lifetime > 0
-              ? Math.max(0, (cardSlot.expiresAt - cardSlot.now) / cardSlot.lifetime)
-              : 1.0
+            readonly property real remainingLifetime: NotificationLogic.popupRemaining(cardSlot.lifetime, cardSlot.expiresAt, cardSlot.now)
             readonly property bool ticking: cardSlot.lifetime > 0 && !card.hovered
             // `hovered` lives on the card, so an onHoveredChanged declared here
             // would watch cardSlot.hovered — which does not exist, and never fire.
@@ -1092,12 +1090,13 @@ Item {
             // the pointer rested on it — otherwise holding a toast open would
             // quietly shorten what is left of it.
             onHoveredChanged: {
+              var at = Date.now()
               if (cardSlot.hovered) {
-                cardSlot.heldSince = Date.now()
+                cardSlot.heldSince = at
               } else if (cardSlot.heldSince > 0) {
-                cardSlot.expiresAt += Date.now() - cardSlot.heldSince
+                cardSlot.expiresAt = NotificationLogic.popupHoverCredit(cardSlot.expiresAt, cardSlot.heldSince, at)
                 cardSlot.heldSince = 0
-                cardSlot.now = Date.now()
+                cardSlot.now = at
               }
             }
 
@@ -1109,13 +1108,10 @@ Item {
             Component.onCompleted: if (cardSlot.hovered) cardSlot.heldSince = Date.now()
 
             function restartCountdown() {
-              cardSlot.now = Date.now()
-              cardSlot.expiresAt = Date.now() + cardSlot.lifetime
-              // Keep an in-progress pause, but restart its timestamp: the
-              // pointer is still on the card, so the pause survives the
-              // refresh, yet time held before the update must not be credited
-              // against the fresh deadline.
-              cardSlot.heldSince = cardSlot.hovered ? Date.now() : 0
+              var state = NotificationLogic.popupRestart(cardSlot.lifetime, Date.now(), cardSlot.hovered)
+              cardSlot.now = state.now
+              cardSlot.expiresAt = state.expiresAt
+              cardSlot.heldSince = state.heldSince
             }
 
             Timer {
