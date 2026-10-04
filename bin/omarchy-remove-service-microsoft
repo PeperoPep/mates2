@@ -5,7 +5,7 @@
 set -e
 
 for app in "Microsoft Outlook" "Microsoft Office" "Microsoft Teams" "Microsoft OneDrive"; do
-  if [[ -f "$HOME/.local/share/applications/$app.desktop" ]]; then
+  if sed -sn '/^\[Desktop Entry\]$/,/^\[/{/^Exec=/p}' "$HOME/.local/share/applications/$app.desktop" 2>/dev/null | grep -q '^Exec=omarchy-launch-webapp '; then
     omarchy-webapp-remove "$app"
   fi
 done
