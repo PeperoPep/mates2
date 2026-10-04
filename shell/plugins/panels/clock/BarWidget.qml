@@ -119,6 +119,25 @@ BarWidget {
     onDateChanged: root.displayDate = date
   }
 
+  // Quickshell's SystemClock arms a one-shot QTimer using CLOCK_MONOTONIC for the delay
+  // until the next minute. Monotonic time freezes during suspend, so the remaining delay
+  // has to elapse after resume before SystemClock ticks. Watching wall-clock time ensures
+  // any suspend/resume gap refreshes the displayDate to the current minute immediately.
+  Timer {
+    id: sleepWatch
+    interval: 1000
+    repeat: true
+    running: true
+    property double lastTickMs: Date.now()
+    onTriggered: {
+      var now = Date.now()
+      if (now - lastTickMs > 2500) {
+        root.refresh()
+      }
+      lastTickMs = now
+    }
+  }
+
   Loader {
     id: panelLoader
     active: true
