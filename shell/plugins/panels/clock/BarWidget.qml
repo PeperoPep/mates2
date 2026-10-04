@@ -35,9 +35,12 @@ BarWidget {
   readonly property string displayText: formatted(displayDate)
   readonly property var verticalLines: displayText.split("\n")
 
-  function refresh() {
+  function refresh(keepView) {
     displayDate = new Date()
-    if (panelLoader.item && panelLoader.item.refresh) panelLoader.item.refresh()
+    if (panelLoader.item) {
+      panelLoader.item.today = new Date()
+      if (!keepView && panelLoader.item.refresh) panelLoader.item.refresh()
+    }
   }
 
   function cycleFormat() {
@@ -131,8 +134,8 @@ BarWidget {
     property double lastTickMs: Date.now()
     onTriggered: {
       var now = Date.now()
-      if (now - lastTickMs > 2500) {
-        root.refresh()
+      if (Math.abs(now - lastTickMs) > 2500) {
+        root.refresh(true)
       }
       lastTickMs = now
     }
@@ -152,7 +155,7 @@ BarWidget {
   ShellIpc {
     target: "omarchy.clock"
 
-    function refresh(): void { root.broadcast("refresh") }
+    function refresh(): void { root.broadcast("refresh", [true]) }
     function cycleFormat(): void { root.cycleFormat() }
     function toggleWeekStart(): void { root.toggleWeekStart() }
     function open(): void { root.open() }
