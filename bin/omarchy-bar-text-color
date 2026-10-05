@@ -111,8 +111,15 @@ esac
 
 # Sample the first frame only. Without the selector a video background makes
 # ImageMagick decode the whole file and emit one value per frame, and the match
-# below then fails into the fallback colour.
-pixel=$(magick "$background_path[0]" -auto-orient \
+# below then fails into the fallback colour. Do not let an oversized image spill
+# its pixel cache into a memory map or /tmp (a tmpfs on Omarchy); fall back to the
+# configured text color when the bounded sample cannot finish cheaply.
+pixel=$(MAGICK_MEMORY_LIMIT=256MiB \
+  MAGICK_MAP_LIMIT=0 \
+  MAGICK_DISK_LIMIT=0 \
+  MAGICK_TIME_LIMIT=5 \
+  MAGICK_THREAD_LIMIT=2 \
+  timeout --kill-after=1s 5s magick "$background_path[0]" -auto-orient \
   -resize "${screen_width}x${screen_height}^" \
   -gravity center -extent "${screen_width}x${screen_height}" \
   -gravity NorthWest -crop "$crop" +repage \

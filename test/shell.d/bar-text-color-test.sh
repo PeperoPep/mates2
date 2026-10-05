@@ -41,3 +41,26 @@ ffmpeg -y -f lavfi -i "testsrc=size=640x360:rate=10:duration=2" \
 result=$(HOME="$TMPDIR" omarchy-bar-text-color top 40 '#ffffff' '#101010' --background "$light_top_video" --screen 640x360)
 [[ $result == "#101010" ]] || fail "transparent bar text samples one frame of a video wallpaper" "expected #101010, got $result"
 pass "transparent bar text samples one frame of a video wallpaper"
+
+bounded_bin="$TMPDIR/bounded-bin"
+mkdir -p "$bounded_bin"
+cat >"$bounded_bin/timeout" <<'SH'
+#!/bin/bash
+printf '%s\t%s\t%s\n' "$1" "$2" "$3" >"$TIMEOUT_LOG"
+shift 2
+exec "$@"
+SH
+cat >"$bounded_bin/magick" <<'SH'
+#!/bin/bash
+printf '%s\t%s\t%s\t%s\t%s\n' \
+  "$MAGICK_MEMORY_LIMIT" "$MAGICK_MAP_LIMIT" "$MAGICK_DISK_LIMIT" "$MAGICK_TIME_LIMIT" "$MAGICK_THREAD_LIMIT" >"$LIMIT_LOG"
+printf '245,245,245'
+SH
+chmod +x "$bounded_bin/timeout" "$bounded_bin/magick"
+
+result=$(HOME="$TMPDIR" LIMIT_LOG="$TMPDIR/limits" TIMEOUT_LOG="$TMPDIR/timeout" PATH="$bounded_bin:$PATH" \
+  omarchy-bar-text-color top 20 '#ffffff' '#101010' --background "$light_top" --screen 100x100)
+[[ $result == "#101010" ]] || fail "bounded wallpaper sample still chooses the contrasting color" "expected #101010, got $result"
+[[ $(<"$TMPDIR/limits") == $'256MiB\t0\t0\t5\t2' ]] || fail "wallpaper sampling bounds ImageMagick resources" "$(<"$TMPDIR/limits")"
+[[ $(<"$TMPDIR/timeout") == $'--kill-after=1s\t5s\tmagick' ]] || fail "wallpaper sampling has a hard timeout" "$(<"$TMPDIR/timeout")"
+pass "transparent bar wallpaper sampling is resource bounded"
