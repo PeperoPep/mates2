@@ -2053,6 +2053,7 @@ Panel {
         anchors.bottomMargin: Style.spacing.rowGap / 2
         anchors.rightMargin: Style.space(6)
         password: true
+        revealable: true
         placeholderText: "Passphrase"
         font.family: Style.font.family
         font.pixelSize: Style.font.body
