@@ -200,6 +200,17 @@ assert(/precision: root\.showsSeconds \? SystemClock\.Seconds : SystemClock\.Min
 // must reach the label.
 assert(/showsSeconds: Model\.clockNeedsSeconds\(activeFormat\)/.test(widgetSource), 'clock decides its tick rate from the format it is showing')
 assert(/onDateChanged: root\.displayDate = date/.test(widgetSource), 'clock repaints the label on every tick')
+const shouldTriggerSleepRefresh = (now, lastTickMs) => Math.abs(now - lastTickMs) > 2500
+assert(!shouldTriggerSleepRefresh(1000, 0), 'normal 1s interval does not trigger clock refresh')
+assert(!shouldTriggerSleepRefresh(2400, 0), 'sub-2.5s jitter does not trigger clock refresh')
+assert(shouldTriggerSleepRefresh(60000, 0), 'forward gap across suspend triggers clock refresh')
+assert(shouldTriggerSleepRefresh(0, 60000), 'backward gap across NTP step triggers clock refresh')
+assert(
+  /id: sleepWatch/.test(widgetSource) &&
+    /Math\.abs\(now - lastTickMs\) > 2500/.test(widgetSource) &&
+    /root\.refresh\(true\)/.test(widgetSource),
+  'clock monitors wall-clock time in both directions to refresh immediately across suspend/resume while keeping calendar view'
+)
 assert(/setting\("weekStartDay", null\)/.test(panelSource) && /persistSettings\(\{ weekStartDay:/.test(panelSource), 'calendar reads and writes the week start as weekStartDay')
 assert(/updateEntryInline/.test(panelSource), 'calendar panel persists the week start to shell.json')
 assert(/function moveMonth\(delta\)/.test(panelSource), 'calendar panel steps between months')
@@ -269,3 +280,7 @@ grep -q 'o.bind("SUPER + CTRL + ALT + D", "Calendar", { panel = "omarchy.clock" 
   "$ROOT/default/hypr/bindings/utilities.lua" ||
   fail "SUPER+CTRL+ALT+D toggles the calendar panel"
 pass "SUPER+CTRL+ALT+D toggles the calendar panel"
+
+grep -q 'omarchy-shell -q omarchy.clock refresh' "$ROOT/bin/omarchy-system-wake" ||
+  fail "system wake triggers clock refresh"
+pass "system wake triggers clock refresh"
