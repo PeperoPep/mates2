@@ -28,19 +28,33 @@ printf 'unrelated\n' >"$source_dir/other.conf"
 OMARCHY_BINFMT_SOURCE_DIR="$source_dir" OMARCHY_BINFMT_DIR="$dest_dir" \
   bash -euo pipefail "$config_script" >/dev/null
 
-grep -qFx ':qemu-aarch64:M::magic:mask:/usr/bin/qemu-aarch64-static:OCF' "$dest_dir/qemu-aarch64-static.conf" ||
-  fail "binfmt config overrides aarch64 flags with OCF"
-grep -qFx ':qemu-arm:M::magic:mask:/usr/bin/qemu-arm-static:OCF' "$dest_dir/qemu-arm-static.conf" ||
-  fail "binfmt config overrides arm flags with OCF"
+grep -qFx ':qemu-aarch64:M::magic:mask:/usr/bin/qemu-aarch64-static:FPOC' "$dest_dir/qemu-aarch64-static.conf" ||
+  fail "binfmt config adds O and C to aarch64 flags without dropping FP"
+grep -qFx ':qemu-arm:M::magic:mask:/usr/bin/qemu-arm-static:FPOC' "$dest_dir/qemu-arm-static.conf" ||
+  fail "binfmt config adds O and C to arm flags without dropping FP"
 [[ -f $dest_dir/other.conf ]] && fail "binfmt config copies files that aren't qemu static registrations"
-pass "binfmt config overrides every qemu static registration with OCF flags"
+pass "binfmt config adds O and C to every qemu static registration without dropping existing flags"
 
-# Re-running must stay clean and keep producing OCF.
+# Re-running must stay clean and keep producing FPOC, not pile up duplicate
+# letters (FPOCOC, ...).
 OMARCHY_BINFMT_SOURCE_DIR="$source_dir" OMARCHY_BINFMT_DIR="$dest_dir" \
   bash -euo pipefail "$config_script" >/dev/null
-grep -qFx ':qemu-aarch64:M::magic:mask:/usr/bin/qemu-aarch64-static:OCF' "$dest_dir/qemu-aarch64-static.conf" ||
+grep -qFx ':qemu-aarch64:M::magic:mask:/usr/bin/qemu-aarch64-static:FPOC' "$dest_dir/qemu-aarch64-static.conf" ||
   fail "binfmt config is idempotent"
 pass "binfmt config is idempotent"
+
+# A registration that already carries O and C (just reordered, or with an
+# extra flag the package added later) is left untouched rather than
+# duplicated.
+preset_dir="$test_tmp/preset-etc-binfmt.d"
+mkdir -p "$preset_dir"
+printf ':qemu-riscv64:M::magic:mask:/usr/bin/qemu-riscv64-static:FPOCX\n' >"$source_dir/qemu-riscv64-static.conf"
+OMARCHY_BINFMT_SOURCE_DIR="$source_dir" OMARCHY_BINFMT_DIR="$preset_dir" \
+  bash -euo pipefail "$config_script" >/dev/null
+grep -qFx ':qemu-riscv64:M::magic:mask:/usr/bin/qemu-riscv64-static:FPOCX' "$preset_dir/qemu-riscv64-static.conf" ||
+  fail "binfmt config leaves a registration that already has O and C untouched"
+pass "binfmt config leaves a registration that already has O and C untouched"
+rm -f "$source_dir/qemu-riscv64-static.conf"
 
 # A dev checkout may run before qemu-user-static-binfmt is installed, so the
 # source directory can be empty; the script must not fail on the unmatched
@@ -90,7 +104,7 @@ write_conf aarch64 "$stale_dir/qemu-aarch64-static.conf"
 : >"$test_tmp/calls.log"
 run_migration "$stale_dir"
 
-grep -qFx ':qemu-aarch64:M::magic:mask:/usr/bin/qemu-aarch64-static:OCF' "$stale_dir/qemu-aarch64-static.conf" ||
+grep -qFx ':qemu-aarch64:M::magic:mask:/usr/bin/qemu-aarch64-static:FPOC' "$stale_dir/qemu-aarch64-static.conf" ||
   fail "binfmt migration rewrites a stale registration"
 grep -qFx 'systemctl restart systemd-binfmt.service' "$test_tmp/calls.log" ||
   fail "binfmt migration restarts systemd-binfmt.service"
@@ -100,7 +114,7 @@ pass "binfmt migration fixes existing installs and restarts the binfmt service"
 : >"$test_tmp/calls.log"
 run_migration "$stale_dir"
 [[ ! -s $test_tmp/calls.log ]] || fail "binfmt migration skips already-fixed installs"
-pass "binfmt migration is a no-op once the registration already carries OCF"
+pass "binfmt migration is a no-op once the registration already carries O and C"
 
 # A partially-fixed install (say aarch64 was hand-edited already, or the
 # package added an architecture after this migration last ran for this user)
@@ -108,14 +122,14 @@ pass "binfmt migration is a no-op once the registration already carries OCF"
 # package registers, not just one.
 partial_dir="$test_tmp/partial-etc-binfmt.d"
 mkdir -p "$partial_dir"
-printf ':qemu-aarch64:M::magic:mask:/usr/bin/qemu-aarch64-static:OCF\n' >"$partial_dir/qemu-aarch64-static.conf"
+printf ':qemu-aarch64:M::magic:mask:/usr/bin/qemu-aarch64-static:FPOC\n' >"$partial_dir/qemu-aarch64-static.conf"
 write_conf arm "$partial_dir/qemu-arm-static.conf"
 
 : >"$test_tmp/calls.log"
 run_migration "$partial_dir"
 
-grep -qFx ':qemu-arm:M::magic:mask:/usr/bin/qemu-arm-static:OCF' "$partial_dir/qemu-arm-static.conf" ||
-  fail "binfmt migration fixes an architecture still on FP even when another already carries OCF"
+grep -qFx ':qemu-arm:M::magic:mask:/usr/bin/qemu-arm-static:FPOC' "$partial_dir/qemu-arm-static.conf" ||
+  fail "binfmt migration fixes an architecture still on FP even when another already carries O and C"
 grep -qFx 'systemctl restart systemd-binfmt.service' "$test_tmp/calls.log" ||
   fail "binfmt migration restarts systemd-binfmt.service for a partially-fixed install"
 pass "binfmt migration checks every registered architecture, not just one"

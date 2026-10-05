@@ -20,10 +20,17 @@ as_root() {
 needs_fix=0
 for conf in "$binfmt_source_dir"/qemu-*-static.conf; do
   [[ -e $conf ]] || continue
-  grep -q ':OCF$' "$binfmt_dir/$(basename "$conf")" 2>/dev/null || {
+  installed="$binfmt_dir/$(basename "$conf")"
+  if [[ -r $installed ]]; then
+    flags=$(<"$installed")
+    flags=${flags##*:}
+  else
+    flags=""
+  fi
+  if [[ $flags != *O* || $flags != *C* ]]; then
     needs_fix=1
     break
-  }
+  fi
 done
 (( needs_fix )) || exit 0
 
