@@ -412,6 +412,42 @@ function popupExpired(entry, duration, now) {
   return (Number(now) - Number((entry || {}).timestamp || 0)) >= lifetime
 }
 
+// The on-screen countdown is measured on the wall clock, not by counting timer
+// ticks: the delegate keeps a deadline (expiresAt) and a `now` that its timer
+// bumps, and derives what is left from the difference. A suspend stops the
+// timer, so a tick-counted countdown would grant only the ticks it missed
+// instead of the real elapsed time, and the toast would outlive its advertised
+// lifetime by the whole sleep. A lifetime of 0 marks a critical popup that
+// never expires.
+function popupRemaining(lifetime, expiresAt, now) {
+  var duration = Number(lifetime || 0)
+  if (!isFinite(duration) || duration <= 0) return 1.0
+  return Math.max(0, (Number(expiresAt) - Number(now)) / duration)
+}
+
+// Hover pauses the countdown, so the deadline moves out by exactly the time the
+// pointer rested on the card. A heldSince of 0 means no pause is in progress
+// and leaves the deadline untouched.
+function popupHoverCredit(expiresAt, heldSince, now) {
+  var since = Number(heldSince || 0)
+  if (!isFinite(since) || since <= 0) return Number(expiresAt)
+  return Number(expiresAt) + (Number(now) - since)
+}
+
+// A content or timeout refresh restarts the countdown from `now`. An
+// in-progress hover survives the refresh — the pointer is still on the card —
+// but its timestamp restarts too, so time held before the fresh deadline
+// existed is not credited against it. A toast that appears under a stationary
+// cursor starts already held, since it never gets a hover-enter transition.
+function popupRestart(lifetime, now, hovered) {
+  var at = Number(now)
+  return {
+    now: at,
+    expiresAt: at + Number(lifetime || 0),
+    heldSince: hovered ? at : 0
+  }
+}
+
 function popupPlacement(barPosition, barClearance, gapsOut) {
   var position = String(barPosition || "top")
   var clearance = Number(barClearance)
@@ -492,6 +528,9 @@ if (typeof module !== "undefined") {
     serializePopup: serializePopup,
     parsePopupFiles: parsePopupFiles,
     popupExpired: popupExpired,
+    popupRemaining: popupRemaining,
+    popupHoverCredit: popupHoverCredit,
+    popupRestart: popupRestart,
     popupPlacement: popupPlacement
   }
 }

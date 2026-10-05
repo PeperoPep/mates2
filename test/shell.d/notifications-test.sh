@@ -712,8 +712,76 @@ assert(
   'notifications service releases the file queue even when a history read comes back empty'
 )
 assert(
-  /onSummaryChanged: cardSlot\.remainingLifetime = 1\.0/.test(serviceQml),
+  /onSummaryChanged: cardSlot\.restartCountdown\(\)/.test(serviceQml),
   'notifications service restarts the countdown when a toast is updated under it'
+)
+// The countdown is wall-clock based: remaining time is the gap between the
+// deadline and `now`, not a count of timer ticks. A suspend stops the timer, so
+// a tick-counted countdown would grant the sleep as credit and let the toast
+// outlive its advertised lifetime. Drive the arithmetic directly rather than
+// matching the QML source, so these assertions fail if the behavior regresses.
+assertEqual(
+  notifications.popupRemaining(30000, 30000, 0),
+  1,
+  'notifications start a popup countdown at its full lifetime'
+)
+assertEqual(
+  notifications.popupRemaining(30000, 30000, 10000),
+  20000 / 30000,
+  'notifications derive the popup countdown from wall-clock time, not timer ticks'
+)
+assertEqual(
+  notifications.popupRemaining(30000, 30000, 90000000),
+  0,
+  'a popup whose deadline passed during a suspend is fully expired on resume'
+)
+assertEqual(
+  notifications.popupRemaining(0, 0, 999999),
+  1,
+  'a critical popup with no lifetime never counts down'
+)
+// Hover pauses the countdown, so the deadline moves out by the time the pointer
+// rested on the card; otherwise holding a toast open would burn its lifetime.
+assertEqual(
+  notifications.popupHoverCredit(30000, 5000, 12000),
+  37000,
+  'notifications give back the time a toast was held open on hover'
+)
+assertEqual(
+  notifications.popupHoverCredit(30000, 0, 12000),
+  30000,
+  'notifications leave the deadline alone when no hover pause is in progress'
+)
+// A refresh restarts the countdown and its hover timestamp together, so time
+// held before the fresh deadline existed is not credited against it.
+assertDeepEqual(
+  notifications.popupRestart(30000, 100000, true),
+  { now: 100000, expiresAt: 130000, heldSince: 100000 },
+  'notifications restart an in-progress hover pause when the countdown is reset'
+)
+assertDeepEqual(
+  notifications.popupRestart(30000, 100000, false),
+  { now: 100000, expiresAt: 130000, heldSince: 0 },
+  'notifications clear the hover pause when the countdown is reset off-hover'
+)
+// An onHoveredChanged declared beside `hovered` on cardSlot would watch
+// cardSlot.hovered, which does not exist: the handler would never fire and
+// holding a toast open would silently burn its lifetime. The alias is what
+// makes the handler above reachable, so assert it exists rather than assuming.
+assert(
+  /readonly property bool hovered: card\.hovered/.test(serviceQml),
+  'notifications service aliases the card hover state into the delegate scope its handler watches'
+)
+assert(
+  /onLifetimeChanged: cardSlot\.restartCountdown\(\)/.test(serviceQml),
+  'notifications service re-derives the popup deadline when the timeout changes without a content change'
+)
+// A toast that appears under a stationary cursor never fires hover-enter, so
+// heldSince would stay 0 and the pause would burn the toast's lifetime. The
+// creation seed is what makes the release path credit that hold.
+assert(
+  /Component\.onCompleted: if \(cardSlot\.hovered\) cardSlot\.heldSince = Date\.now\(\)/.test(serviceQml),
+  'notifications service credits the hover of a toast that appears under the cursor'
 )
 assert(
   /awk 1 \\"\$1\\"\/\*\.json 2>\/dev\/null \|\| true", "--", historyDir/.test(serviceQml),
