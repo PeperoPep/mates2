@@ -34,6 +34,7 @@ Item {
   property bool stayAwakeStateLoaded: false
   property bool hasPendingStayAwakePersist: false
   property bool pendingStayAwakePersist: false
+  property double inhibitorStartedAt: 0
   property bool idledThisCycle: false
   property bool screensaverStartedThisCycle: false
   property string lastEvent: "starting"
@@ -216,7 +217,14 @@ Item {
       processes: {
         screensaver: screensaverProcess.running,
         lock: lockProcess.running,
-        wake: wakeProcess.running
+        wake: wakeProcess.running,
+        idleInhibitor: sleepInhibitorProcess.running
+      },
+      inhibitors: {
+        // What the shell requested and the process it holds, not confirmation
+        // that logind or the compositor accepted the inhibitor.
+        waylandRequested: root.stayAwake,
+        systemdProcessRunning: sleepInhibitorProcess.running
       },
       lastEvent: root.lastEvent,
       lastEventAt: root.lastEventAt
@@ -250,6 +258,7 @@ Item {
 
     root.stayAwake = enabled
     root.stayAwakeStateLoaded = true
+    reconcileIdleInhibitor()
 
     if (!changed) return enabled ? "disabled" : "enabled"
 
@@ -258,6 +267,25 @@ Item {
     else Qt.callLater(root.handleIdleChanged)
 
     return enabled ? "disabled" : "enabled"
+  }
+
+  // The state file is the single source of truth; the shell owns the actual
+  // inhibitor for as long as that state says Stay Awake is on. This keeps the
+  // lifetime tied to the shell instead of to a short-lived CLI.
+  function reconcileIdleInhibitor() {
+    if (root.stayAwake) {
+      if (!sleepInhibitorProcess.running) {
+        logEvent("inhibitor-start", "systemd idle inhibitor")
+        root.inhibitorStartedAt = Date.now()
+        sleepInhibitorProcess.running = true
+      }
+      return
+    }
+
+    if (sleepInhibitorProcess.running) {
+      logEvent("inhibitor-stop", "systemd idle inhibitor")
+      sleepInhibitorProcess.running = false
+    }
   }
 
   function setIdleEnabled(value) {
@@ -336,6 +364,63 @@ Item {
       }
 
       root.refreshStayAwakeState()
+    }
+  }
+
+  // Stay Awake must be visible outside the shell. The Wayland idle inhibitor
+  // covers Wayland-aware consumers; this systemd idle inhibitor covers logind
+  // and systemd-aware idle daemons such as hypridle.
+  //
+  // `idle` is intentional: Stay Awake disables idle handling/locking, but does
+  // not disable explicit suspend or hibernation.
+  Process {
+    id: sleepInhibitorProcess
+    command: [
+      "systemd-inhibit",
+      "--what=idle",
+      "--mode=block",
+      "--who=omarchy-shell",
+      "--why=Stay awake is enabled",
+      "sleep",
+      "infinity"
+    ]
+    onExited: function(exitCode, exitStatus) {
+      root.logEvent("process-exit", "idle-inhibitor exitCode=" + exitCode + " status=" + exitStatus)
+      // The inhibitor should outlive every state change. If it stops while Stay
+      // Awake is still set — a crash, or a stop that raced a re-enable —
+      // reconcile at once, so a rapid off/on does not wait out the backoff. A
+      // process that dies almost immediately is a failed start, so it keeps the
+      // backoff instead of spinning.
+      if (!root.stayAwake) return
+      if (Date.now() - root.inhibitorStartedAt >= 1000) root.reconcileIdleInhibitor()
+      else inhibitorRetryTimer.restart()
+    }
+  }
+
+  Timer {
+    id: inhibitorRetryTimer
+    interval: 2000
+    repeat: false
+    onTriggered: root.reconcileIdleInhibitor()
+  }
+
+  // IdleInhibitor requires a Wayland surface. Use a minimal PanelWindow as the
+  // surface anchor without affecting layout, input, or layer-shell exclusion.
+  PanelWindow {
+    id: idleInhibitorWindow
+    anchors { top: true; left: true }
+    implicitWidth: 1
+    implicitHeight: 1
+    color: "transparent"
+    mask: Region {}
+    exclusionMode: ExclusionMode.Ignore
+    WlrLayershell.namespace: "omarchy-stay-awake"
+    WlrLayershell.layer: WlrLayer.Background
+    WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+
+    IdleInhibitor {
+      window: idleInhibitorWindow
+      enabled: root.stayAwake
     }
   }
 
