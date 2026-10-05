@@ -5,6 +5,41 @@ run_node_test <<'JS'
 const fs = require('fs')
 
 const backgroundQml = fs.readFileSync(path.join(root, 'shell/plugins/background/Background.qml'), 'utf8')
+const samplerQml = fs.readFileSync(path.join(root, 'shell/plugins/background/BarStripSampler.qml'), 'utf8')
+
+// The bar's strip is read from an image already decoded for display: never
+// from a video, matched by the image's own source, and a theme switch's
+// snapshot frame stands for its final path. Anything else answers "" so the
+// bar decodes the file instead.
+assert(
+  /function sampleBarStrip\(position, barSize, callback\) \{[\s\S]*?if \(!currentBackground \|\| isVideo\(currentBackground\)\) \{\s*callback\(""\)/.test(backgroundQml) &&
+    /if \(root\.currentBackground === path && shows\(incomingFrame, root\.incomingBackground\)\) return incomingFrame/.test(backgroundQml) &&
+    /decodeURIComponent\(String\(image\.source\)\) === decodeURIComponent\(root\.imageUrl\(path\)\)/.test(backgroundQml) &&
+    /id: stripRequestTimer[\s\S]*?root\.finishStripRequest\(root\.stripRequest, ""\)/.test(backgroundQml),
+  'background samples the bar strip only from decoded stills, with a timeout'
+)
+
+// The grab arrives in physical pixels, and the software renderer cannot grab.
+assert(
+  /ctx\.drawImage\(grabUrl, 0, 0, w, h\)/.test(samplerQml) &&
+    /available: GraphicsInfo\.api !== GraphicsInfo\.Software/.test(samplerQml),
+  'bar strip sampler scales the grab to the strip and skips the software renderer'
+)
+
+// A resized canvas only has a buffer of its new size once it paints; reading
+// before that returned black. Nothing it drew may stay visible over a video.
+assert(
+  /onPaint: root\.average\(\)/.test(samplerQml) &&
+    /getImageData\(0, 0, w, h\)\.data\s*(\/\/[^\n]*\s*)*ctx\.clearRect\(0, 0, w, h\)/.test(samplerQml),
+  'bar strip sampler reads the canvas only when it paints, then clears it'
+)
+
+// ImageMagick flattens a transparent wallpaper over white; the sampler must
+// weigh transparency the same way or the two paths choose differently.
+assert(
+  /var alpha = data\[i \+ 3\] \/ 255\s*var white = 255 \* \(1 - alpha\)\s*red \+= data\[i\] \* alpha \+ white/.test(samplerQml),
+  'bar strip sampler counts transparent pixels as white, like the file path'
+)
 
 assert(
   /function openThemeSwitcher\(\) \{[\s\S]*if \(!root\.shell \|\| !root\.shell\.summon\("omarchy\.image-picker", payload\)\)\s*Util\.execArgv\(\["omarchy-shell", "shell", "summon", "omarchy\.image-picker", payload\]\)/.test(backgroundQml) &&
