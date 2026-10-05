@@ -74,4 +74,8 @@ assert(
     /function prepareBackground[\s\S]*?requestNativeSize\(path\)/.test(backgroundQml),
   'background never probes videos and probes a prepared frame ahead of its transition'
 )
+assert(
+  mediaQml.includes('smooth: true') && mediaQml.includes('mipmap: true'),
+  'background media enables smooth filtering and mipmapping to prevent downscale aliasing'
+)
 JS
