@@ -622,6 +622,33 @@ pass "vscode generated theme clears obsolete extension marker"
 jq -e '.[] | select(.identifier.id == "local.omarchy-theme" and .relativeLocation == "omarchy-theme")' "$PI_TMPDIR/.vscode/extensions/extensions.json" >/dev/null || fail "vscode generated theme registers local extension"
 pass "vscode generated theme registers local extension"
 
+cat >"$FAKE_BIN/wpctl" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+chmod +x "$FAKE_BIN/wpctl"
+
+cat >"$FAKE_BIN/pactl" <<'EOF'
+#!/bin/bash
+case "$1 $2" in
+  "list short")
+    printf '41\t50\t-\tprotocol-native.c\tfloat32le 1ch 48000Hz\n'
+    printf '42\t50\t87\tprotocol-native.c\tfloat32le 1ch 48000Hz\n'
+    ;;
+  move-source-output*)
+    echo "$*" >>"${PACTL_LOG:-/dev/null}"
+    ;;
+esac
+EOF
+chmod +x "$FAKE_BIN/pactl"
+
+PACTL_LOG="$PI_TMPDIR/pactl.log" PATH="$FAKE_BIN:$ROOT/bin:$PATH" "$ROOT/bin/omarchy-audio-input-set-default" 43 alsa_input.mic
+grep -qx 'move-source-output 42 alsa_input.mic' "$PI_TMPDIR/pactl.log" || fail "input set default moves source outputs owned by a client"
+pass "input set default moves source outputs owned by a client"
+! grep -q 'move-source-output 41 ' "$PI_TMPDIR/pactl.log" || fail "input set default leaves clientless source outputs in place"
+pass "input set default leaves clientless source outputs in place"
+rm -f "$FAKE_BIN/wpctl" "$FAKE_BIN/pactl"
+
 for binary in \
   omarchy-update \
   omarchy-theme-set \
