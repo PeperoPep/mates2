@@ -9,6 +9,7 @@ const fs = require('fs')
 const weather = requireFromRoot('shell/plugins/panels/weather/Model.js')
 const panelSource = fs.readFileSync(root + '/shell/plugins/panels/weather/Panel.qml', 'utf8')
 const widgetSource = fs.readFileSync(root + '/shell/plugins/panels/weather/BarWidget.qml', 'utf8')
+const modelSource = fs.readFileSync(root + '/shell/plugins/panels/weather/Model.js', 'utf8')
 
 assertDeepEqual(weather.parseLocationFile('{"name": "Malibu", "latitude": 34.02577, "longitude": -118.7804}\n'), { name: 'Malibu', latitude: 34.02577, longitude: -118.7804 }, 'weather parses name plus coordinates from weather.json')
 assertDeepEqual(weather.parseLocationFile('{"name": "New York"}'), { name: 'New York', latitude: null, longitude: null }, 'weather parses a name-only weather.json')
@@ -109,6 +110,30 @@ assertEqual(weather.currentIcon({ openMeteoWeatherCode: 0, isDay: 0 }, ''), weat
 assert(weather.iconForOpenMeteoCode(45, true) !== weather.iconForOpenMeteoCode(45, false), 'weather distinguishes nighttime fog from daytime fog')
 assertEqual(weather.provisionalCurrentIcon({ weatherCode: 113 }, ''), weather.iconForCode(113, false), 'weather uses wttr to fill an empty initial icon')
 assertEqual(weather.provisionalCurrentIcon({ weatherCode: 113 }, 'night'), 'night', 'weather refresh preserves a resolved day-night icon')
+assert(
+  /var count = Math\.min\(results\.length, 10\)/.test(modelSource) &&
+    /var count = Math\.min\(daily\.time\.length, 8\)/.test(modelSource) &&
+    /var count = Math\.min\(days\.length, 8\)/.test(modelSource),
+  'weather caps geocoding and forecast array iteration'
+)
+assert(
+  panelSource.includes('if (forecastProcExit === -1 || forecastOutput === null) return') &&
+    panelSource.includes('root.forecastProcExit = -1') &&
+    panelSource.includes('root.forecastOutput = null'),
+  'weather stages both fetch signals and resets them when a run starts'
+)
+assert(
+  panelSource.includes('forecastExpectedStop = false') &&
+    panelSource.includes('dailyForecastExpectedStop = false'),
+  'weather drops expectedly-stopped fetch runs without a retry'
+)
+// Quickshell's runningChanged carries no arguments, so a handler parameter
+// named `running` shadows the property with undefined and the reset never runs.
+assert(
+  (panelSource.match(/onRunningChanged: \{\n\s+if \(running\) \{/g) || []).length === 4 &&
+    !/onRunningChanged: function\s*\(/.test(panelSource),
+  'weather fetch reset handlers read the running property rather than a signal argument'
+)
 // The bar identifies a panel by the widget in its slot, so the nested panel
 // has to present the host widget rather than itself — otherwise the
 // open-panel dot never lights and Tab cannot leave the panel.
