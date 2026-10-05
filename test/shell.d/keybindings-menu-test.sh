@@ -2,16 +2,21 @@
 
 source "$(dirname "${BASH_SOURCE[0]}")/base-test.sh"
 
+require_command jq
 require_command lua
 require_command xkbcli
 
 tmpdir=$(mktemp -d) && [[ -n $tmpdir && -d $tmpdir ]] ||
   fail "the test gets a temporary directory to stub Hyprland in"
 trap 'rm -rf "$tmpdir"' EXIT
+sed '/^if \[\[ \$1 ==/,$d' "$ROOT/bin/omarchy-menu-keybindings" >"$tmpdir/scanner.sh"
 
 home="$tmpdir/home"
 stub_bin="$tmpdir/bin"
 mkdir -p "$home/.config" "$stub_bin"
+for query in workspaces monitors clients; do
+  echo '[]' >"$tmpdir/$query.json"
+done
 cp -r "$ROOT/config/hypr" "$home/.config/hypr"
 
 # The menu reads binds from Hyprland, which is not running here, so stand in for
@@ -29,6 +34,7 @@ exec_bind() {
 stub_hyprctl() {
   {
     echo '#!/bin/bash'
+    printf 'if [[ $1 == "-j" ]]; then cat "%s/$2.json"; exit $?; fi\n' "$tmpdir"
     echo 'case "$1" in'
     echo '  binds) cat <<'"'"'BINDS'"'"''
     cat
@@ -233,15 +239,118 @@ grep -qP '→ Terminal\texec\tomarchy-launch-terminal$' "$tmpdir"/cache/omarchy/
   fail "picking the terminal bind from the menu launches a terminal" "$(cat "$tmpdir"/cache/omarchy/keybindings-*.records)"
 pass "picking the terminal bind from the menu launches a terminal"
 
-# A user config that iterates a runtime query such as hl.get_workspaces() must not
-# hang the scan: the mocked API answers with an empty list.
-cat >"$home/.config/hypr/hyprland.lua" <<'LUA'
-for _, workspace in ipairs(hl.get_workspaces()) do
+# Runtime queries must be finite tables, and generated dispatch metadata must
+# survive both the loop and the binding declared after it.
+for query in workspaces monitors clients windows; do
+  fixture=$query
+  [[ $query == "windows" ]] && fixture=clients
+  echo '[{"id": 2, "name": "test", "address": "0x123", "workspace": {"id": 2}}]' >"$tmpdir/$fixture.json"
+  cat >"$home/.config/hypr/hyprland.lua" <<LUA
+for _, item in ipairs(hl.get_$query()) do
+  hl.bind("SUPER + " .. item.id, hl.dsp.exec_cmd("echo " .. item.name), {description = "Query binding"})
 end
+hl.bind("SUPER + A", hl.dsp.exec_cmd("echo after"), {description = "After query"})
 LUA
+  stub_hyprctl <<BINDS
+$(lua_bind 64 "" "Query binding")
+$(lua_bind 64 "" "After query")
+BINDS
+  rm -rf "$tmpdir/cache"
+  timeout 5 env -i PATH="$stub_bin:$ROOT/bin:$PATH" HOME="$home" \
+    XDG_CACHE_HOME="$tmpdir/cache" OMARCHY_PATH="$ROOT" \
+    bash "$ROOT/bin/omarchy-menu-keybindings" --print >/dev/null || fail "$query scan terminates"
+  grep -qP 'SUPER \+ 2 .*→ Query binding\texec\techo test$' "$tmpdir"/cache/omarchy/*.records || fail "$query recovers generated dispatch metadata"
+  grep -qP 'SUPER \+ A .*→ After query\texec\techo after$' "$tmpdir"/cache/omarchy/*.records || fail "$query recovers the binding after the loop"
+  echo '[]' >"$tmpdir/$fixture.json"
+  keybindings >/dev/null
+  grep -qP '→ After query\texec\techo after$' "$tmpdir"/cache/omarchy/*.records || fail "empty $query recovers the binding after the loop"
+  ! grep -qP '→ Query binding\texec' "$tmpdir"/cache/omarchy/*.records || fail "empty $query invalidates generated dispatch metadata"
+  pass "$query snapshots recover loop and following bindings, including empty lists"
+done
 
-timeout 5 env -i PATH="$stub_bin:$ROOT/bin:$PATH" HOME="$home" \
-  XDG_CACHE_HOME="$tmpdir/loop-cache" OMARCHY_PATH="$ROOT" \
-  bash "$ROOT/bin/omarchy-menu-keybindings" --print >/dev/null ||
-  fail "the Lua bind scan terminates when iterating over workspaces"
-pass "the Lua bind scan returns an empty workspace list"
+# Closing delimiters can form across a title and the literal suffix. Exercise
+# trailing brackets, embedded delimiters, and a leading newline without losing
+# the title or any dispatch metadata.
+jq -cn '[{title: "test]"}, {title: "test]=]"}, {title: "\n[[test]]"}]' >"$tmpdir/clients.json"
+cat >"$home/.config/hypr/hyprland.lua" <<'LUA'
+local clients = hl.get_clients()
+assert(clients[1].title == "test]")
+assert(clients[2].title == "test]=]")
+assert(clients[3].title == "\n[[test]]")
+hl.bind("SUPER + A", hl.dsp.exec_cmd("echo titles recovered"), {description = "Snapshot binding"})
+LUA
+stub_hyprctl <<BINDS
+$(lua_bind 64 "" "Snapshot binding")
+BINDS
+rm -rf "$tmpdir/cache"
+keybindings >/dev/null
+grep -qP '→ Snapshot binding\texec\techo titles recovered$' "$tmpdir"/cache/omarchy/*.records || fail "snapshot titles survive Lua literal boundaries"
+pass "snapshot titles survive Lua literal boundaries"
+
+# Each snapshot fits the input bound, but together they exceed Linux's limit
+# for a single environment entry. The scan must still launch and recover binds.
+for query in workspaces monitors clients; do
+  jq -cn '[{name: ("x" * 60000)}]' >"$tmpdir/$query.json"
+done
+cat >"$home/.config/hypr/hyprland.lua" <<'LUA'
+for _, query in ipairs({hl.get_workspaces, hl.get_monitors, hl.get_clients}) do
+  assert(#query()[1].name == 60000)
+end
+hl.bind("SUPER + A", hl.dsp.exec_cmd("echo large recovered"), {description = "Snapshot binding"})
+LUA
+rm -rf "$tmpdir/cache"
+keybindings >/dev/null
+grep -qP '→ Snapshot binding\texec\techo large recovered$' "$tmpdir"/cache/omarchy/*.records || fail "combined large snapshots recover dispatch metadata"
+pass "combined large snapshots recover dispatch metadata"
+for query in workspaces monitors clients; do
+  echo '[]' >"$tmpdir/$query.json"
+done
+
+# Neither bounded work over the guard nor an infinite loop may publish the
+# binding emitted before interruption. A later valid config must scan afresh.
+for workload in 'local sum = 0; for i = 1, 2000000 do sum = sum + i end' 'while true do end'; do
+  cat >"$home/.config/hypr/hyprland.lua" <<LUA
+hl.bind("SUPER + A", hl.dsp.exec_cmd("echo partial"), {description = "Interrupted binding"})
+$workload
+LUA
+  stub_hyprctl <<BINDS
+$(lua_bind 64 "SUPER + A" "Interrupted binding")
+$(exec_bind 64 "SUPER + B" "Native binding" "echo native")
+BINDS
+  rm -rf "$tmpdir/cache"
+  timeout 5 env -i PATH="$stub_bin:$ROOT/bin:$PATH" HOME="$home" \
+    XDG_CACHE_HOME="$tmpdir/cache" OMARCHY_PATH="$ROOT" \
+    bash "$ROOT/bin/omarchy-menu-keybindings" --print >"$tmpdir/interrupted" || fail "interrupted scan still renders fallback rows"
+  grep -q '→ Native binding' "$tmpdir/interrupted" || fail "native fallback remains available"
+  [[ -z $(find "$tmpdir/cache" -name '*.records') ]] || fail "interrupted scan publishes no cache"
+  env -i PATH="$stub_bin:$ROOT/bin:$PATH" HOME="$home" OMARCHY_PATH="$ROOT" SCANNER="$tmpdir/scanner.sh" \
+    bash -c '
+      source "$SCANNER"
+      capture_lua_query_snapshots
+      output_binding_records_uncached
+    ' >"$tmpdir/partial-records"
+  [[ $? == 1 ]] || fail "interrupted uncached scan returns failure"
+  ! grep -q 'echo partial' "$tmpdir/partial-records" || fail "interrupted scan emits no partial dispatch metadata"
+  cat >"$home/.config/hypr/hyprland.lua" <<'LUA'
+hl.bind("SUPER + A", hl.dsp.exec_cmd("echo recovered"), {description = "Interrupted binding"})
+LUA
+  keybindings >/dev/null
+  grep -qP '→ Interrupted binding\texec\techo recovered$' "$tmpdir"/cache/omarchy/*.records || fail "valid config recovers without changes to reported binds"
+  pass "interrupted scans publish no partial cache and recover on the next scan"
+done
+
+# Failed, malformed, and oversized snapshots must not become successful caches.
+for snapshot in 'invalid JSON' "$(jq -cn '[range(1025) | {id: .}]')"; do
+  printf '%s\n' "$snapshot" >"$tmpdir/workspaces.json"
+  rm -rf "$tmpdir/cache"
+  keybindings >"$tmpdir/snapshot-fallback"
+  [[ -z $(find "$tmpdir/cache" -name '*.records') ]] || fail "invalid snapshot publishes no cache"
+  grep -q '→ Native binding' "$tmpdir/snapshot-fallback" || fail "snapshot failure retains native rows"
+done
+rm "$tmpdir/workspaces.json"
+keybindings >/dev/null
+[[ -z $(find "$tmpdir/cache" -name '*.records') ]] || fail "failed snapshot publishes no cache"
+echo '[]' >"$tmpdir/workspaces.json"
+keybindings >/dev/null
+grep -qP '→ Interrupted binding\texec\techo recovered$' "$tmpdir"/cache/omarchy/*.records || fail "snapshot recovery rescans the config"
+pass "failed and oversized query snapshots cannot publish a cache"

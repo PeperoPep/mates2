@@ -66,22 +66,61 @@ parse_keycodes() {
   '
 }
 
+# Capture once so the cache key and scanner use exactly the same runtime data.
+# Reject oversized snapshots rather than silently omitting generated bindings.
+capture_lua_query_snapshots() {
+  local query snapshot literal
+  LUA_QUERY_SNAPSHOTS=""
+  LUA_QUERY_COMPLETE=1
+
+  for query in workspaces monitors clients; do
+    if snapshot=$(hyprctl -j "$query" 2>/dev/null) &&
+      (( ${#snapshot} <= 65536 )) &&
+      literal=$(jq -er '
+        # Include the suffix prefix so a trailing bracket cannot close the literal early.
+        def quote($marks):
+          if (. + "]" + $marks | contains("]" + $marks + "]")) then quote($marks + "=")
+          else "string.sub([" + $marks + "[x" + . + "]" + $marks + "], 2)" end;
+        def lua:
+          if type == "string" then quote("")
+          elif type == "array" then "{" + (map(lua) | join(",")) + "}"
+          elif type == "object" then
+            "{" + (to_entries | map("[" + (.key | lua) + "]=" + (.value | lua)) | join(",")) + "}"
+          elif . == null then "nil"
+          else tostring end;
+        if type == "array" and length <= 1024 and all(.[]; type == "object") then lua
+        else error("invalid or oversized query snapshot") end
+      ' <<<"$snapshot" 2>/dev/null); then
+      LUA_QUERY_SNAPSHOTS+="queries.$query=$literal"$'\n'
+    else
+      LUA_QUERY_COMPLETE=0
+      [[ $DEBUG == "1" ]] && printf '[DEBUG] lua bind snapshot failed: %s\n' "$query" >&2
+    fi
+  done
+}
+
 # Supplement `hyprctl binds` for Lua-only binds that Hyprland currently
 # reports as dispatcher __lua and without their original key for code: binds.
 build_lua_bind_cache() {
-  local modmask description key dispatcher arg cache_key
+  local modmask description key dispatcher arg cache_key records
 
-  omarchy-cmd-present lua || return 0
+  LUA_BIND_KEY_MAP=()
+  LUA_BIND_DISPATCHER_MAP=()
+  LUA_BIND_ARG_MAP=()
+  [[ $LUA_QUERY_COMPLETE == "1" ]] || return 1
+  omarchy-cmd-present lua || return 1
 
-  while IFS=$'\t' read -r modmask description key dispatcher arg; do
-    [[ -z $modmask || -z $description || -z $key ]] && continue
-
-    LUA_BIND_KEY_MAP["$modmask,$description"]="$key"
-    cache_key="$modmask,$description,$key"
-    LUA_BIND_DISPATCHER_MAP["$cache_key"]="$dispatcher"
-    LUA_BIND_ARG_MAP["$cache_key"]="$arg"
-  done < <(
-    lua <<'LUA'
+  # Keep snapshot data off the environment: combined literals can exceed ARG_MAX
+  # limits for a single environment entry even when every snapshot is bounded.
+  if records=$(lua 3<<<"$LUA_QUERY_SNAPSHOTS" <<'LUA'
+local queries = {}
+local snapshot_file = assert(io.open("/dev/fd/3", "r"))
+local snapshot_source = snapshot_file:read("*a")
+snapshot_file:close()
+assert(load(snapshot_source, "query snapshots", "t", {
+  queries = queries, string = string,
+}))()
+local records = {}
 local modifiers = { SHIFT = 1, CTRL = 4, CONTROL = 4, ALT = 8, SUPER = 64 }
 
 local function split_keys(keys)
@@ -215,22 +254,32 @@ hl = setmetatable({
         arg = o.bind_commands[bind_dispatcher]
       end
 
-      print(table.concat({ tostring(modmask), opts.description, key, kind, arg }, "\t"))
+      records[#records + 1] = table.concat({ tostring(modmask), opts.description, key, kind, arg }, "\t")
     end
 
     return noop
+  end,
+  -- Singular queries may have no matching object during a source scan.
+  get_workspace = function()
+    return nil
+  end,
+  get_active_monitor = function()
+    return nil
   end,
   get_config = function()
     return nil
   end,
   get_monitors = function()
-    return {}
+    return queries.monitors
+  end,
+  get_clients = function()
+    return queries.clients
   end,
   get_windows = function()
-    return {}
+    return queries.clients
   end,
   get_workspaces = function()
-    return {}
+    return queries.workspaces
   end,
 }, {
   __index = function()
@@ -248,12 +297,28 @@ if file then
   end, "", 1000000)
   local ok, err = pcall(dofile, config)
   debug.sethook()
-  if not ok and os.getenv("DEBUG") == "1" then
-    io.stderr:write("[DEBUG] lua bind scan failed: " .. tostring(err) .. "\n")
+  if not ok then
+    if os.getenv("DEBUG") == "1" then
+      io.stderr:write("[DEBUG] lua bind scan failed: " .. tostring(err) .. "\n")
+    end
+    os.exit(1)
   end
 end
+for _, record in ipairs(records) do
+  print(record)
+end
 LUA
-  )
+  ); then
+    while IFS=$'\t' read -r modmask description key dispatcher arg; do
+      [[ -z $modmask || -z $description || -z $key ]] && continue
+      LUA_BIND_KEY_MAP["$modmask,$description"]="$key"
+      cache_key="$modmask,$description,$key"
+      LUA_BIND_DISPATCHER_MAP["$cache_key"]="$dispatcher"
+      LUA_BIND_ARG_MAP["$cache_key"]="$arg"
+    done <<<"$records"
+  else
+    return 1
+  fi
 }
 
 modmask_to_text() {
@@ -525,9 +590,9 @@ dedupe_binding_records() {
 }
 
 output_binding_records_uncached() {
-  local dynamic
+  local dynamic scan_status=0
 
-  build_lua_bind_cache
+  build_lua_bind_cache || scan_status=$?
   dynamic=$(dynamic_bindings)
 
   {
@@ -541,12 +606,13 @@ output_binding_records_uncached() {
 
   # Fail when Hyprland reported no binds so the fallout of a broken hyprctl
   # is never cached.
-  [[ -n $dynamic ]]
+  [[ -n $dynamic ]] && (( scan_status == 0 ))
 }
 
 keybindings_cache_key() {
   {
-    printf 'v14\n'
+    printf 'v16\n'
+    printf '%s\n%s\n' "$LUA_QUERY_COMPLETE" "$LUA_QUERY_SNAPSHOTS"
     hyprctl devices 2>/dev/null | grep -F 'active keymap:'
     hyprctl binds 2>/dev/null
   } | sha256sum | awk '{ print $1 }'
@@ -572,6 +638,7 @@ refresh_keybindings_cache() {
 output_binding_records() {
   local cache_dir cache_file cache_name
 
+  capture_lua_query_snapshots
   cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy"
   cache_name="keybindings-$(keybindings_cache_key).records"
   cache_file="$cache_dir/$cache_name"
