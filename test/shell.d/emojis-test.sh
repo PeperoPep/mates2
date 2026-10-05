@@ -69,12 +69,23 @@ SH
 cat >"$TMPDIR/bin/hyprctl" <<'SH'
 #!/bin/bash
 printf '%s\n' "$*" >>"$HYPRCTL_OUT"
+
+# HYPRCTL_STATE, when set, makes a dispatched focus actually "take" for later
+# activewindow queries - simulating that a focus request eventually sticks,
+# which is what the retry loop in the real helper is waiting on.
+if [[ -n $HYPRCTL_STATE ]]; then
+  dispatched=$(grep -oE 'address:0x[0-9a-fA-F]+' <<<"$*" | head -1)
+  [[ -n $dispatched ]] && printf '%s' "${dispatched#address:}" >"$HYPRCTL_STATE"
+fi
+
 case "$*" in
   *activewindow*)
     if [[ -n $HYPRCTL_ACTIVE ]]; then
       printf '%s\n' "$HYPRCTL_ACTIVE"
     else
-      printf '{"address": "%s", "tags": [%s]}\n' "${HYPRCTL_ADDRESS:-0x0}" "${HYPRCTL_TAGS:-}"
+      address="${HYPRCTL_ADDRESS:-0x0}"
+      [[ -n $HYPRCTL_STATE && -s $HYPRCTL_STATE ]] && address=$(<"$HYPRCTL_STATE")
+      printf '{"address": "%s", "tags": [%s]}\n' "$address" "${HYPRCTL_TAGS:-}"
     fi
     ;;
 esac
@@ -84,8 +95,12 @@ chmod +x "$TMPDIR/bin/wtype" "$TMPDIR/bin/sleep" "$TMPDIR/bin/wl-copy" "$TMPDIR/
 
 term_env=(WTYPE_OUT="$TMPDIR/wtype" SLEEP_OUT="$TMPDIR/sleep" HYPRCTL_OUT="$TMPDIR/hyprctl" WLCOPY_OUT="$TMPDIR/wlcopy" PATH="$TMPDIR/bin:$PATH")
 
-# A terminal is tagged "terminal" (dynamic tags carry a trailing "*").
-env "${term_env[@]}" HYPRCTL_TAGS='"default-opacity*", "terminal*"' \
+# A terminal is tagged "terminal" (dynamic tags carry a trailing "*"). The
+# origin window isn't active yet, so the first retry round dispatches a
+# focus request; HYPRCTL_STATE simulates that request taking effect in time
+# for the loop's next check.
+: >"$TMPDIR/hyprctl-state"
+env "${term_env[@]}" HYPRCTL_STATE="$TMPDIR/hyprctl-state" HYPRCTL_TAGS='"default-opacity*", "terminal*"' \
   "$ROOT/bin/omarchy-menu-emoji-insert" "😀" "0xdeadbeef"
 
 [[ $(<"$TMPDIR/wtype") == "😀" ]] || fail "emoji insert helper types the emoji into a focused terminal"
@@ -115,11 +130,22 @@ env "${term_env[@]}" WTYPE_OUT="$TMPDIR/wtype3" SLEEP_OUT="$TMPDIR/sleep3" \
 ! grep -q "address:" "$TMPDIR/hyprctl" || fail "emoji insert helper stops refocusing once the origin window is active"
 pass "emoji insert helper stops refocusing once the origin window is active"
 
+# The origin window never comes back (e.g. it closed). The retry loop runs out
+# and the helper must stop rather than insert into whatever is focused instead.
+: >"$TMPDIR/hyprctl"
+env "${term_env[@]}" WTYPE_OUT="$TMPDIR/wtype-gone" WLCOPY_OUT="$TMPDIR/wlcopy-gone" \
+  HYPRCTL_ADDRESS="0xothertarget" HYPRCTL_TAGS='"terminal*"' \
+  "$ROOT/bin/omarchy-menu-emoji-insert" "😀" "0xdeadbeef"
+[[ ! -e "$TMPDIR/wtype-gone" ]] || fail "emoji insert helper does not type into the wrong window when the origin never returns"
+pass "emoji insert helper does not type into the wrong window when the origin never returns"
+[[ ! -e "$TMPDIR/wlcopy-gone" ]] || fail "emoji insert helper does not paste into the wrong window when the origin never returns"
+pass "emoji insert helper does not paste into the wrong window when the origin never returns"
+
 # A non-terminal window (here a browser) gets a clipboard paste, not injected
 # Unicode - Chromium and Electron apps drop wtype's transient keymap.
 : >"$TMPDIR/hyprctl"
 env "${term_env[@]}" WTYPE_OUT="$TMPDIR/wtype-gui" WLCOPY_OUT="$TMPDIR/wlcopy-gui" \
-  HYPRCTL_TAGS='"default-opacity*", "firefox-based-browser*"' \
+  HYPRCTL_ADDRESS="0xdeadbeef" HYPRCTL_TAGS='"default-opacity*", "firefox-based-browser*"' \
   "$ROOT/bin/omarchy-menu-emoji-insert" "😀" "0xdeadbeef"
 
 [[ $(<"$TMPDIR/wlcopy-gui") == "😀" ]] || fail "emoji insert helper puts the emoji on the clipboard for a GUI app"
@@ -134,6 +160,7 @@ pass "emoji insert helper does not inject raw Unicode into a GUI app"
 # An untagged window falls back to the paste path.
 : >"$TMPDIR/hyprctl"
 env "${term_env[@]}" WTYPE_OUT="$TMPDIR/wtype-untagged" WLCOPY_OUT="$TMPDIR/wlcopy-untagged" \
+  HYPRCTL_ADDRESS="0xdeadbeef" \
   "$ROOT/bin/omarchy-menu-emoji-insert" "😀" "0xdeadbeef"
 [[ $(<"$TMPDIR/wlcopy-untagged") == "😀" ]] || fail "emoji insert helper defaults to paste for an untagged window"
 pass "emoji insert helper defaults to paste for an untagged window"

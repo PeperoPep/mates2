@@ -34,6 +34,11 @@ if [[ -n $target ]]; then
     focus_window "$target"
     sleep 0.04
   done
+
+  # The origin window never came back (closed, moved workspace, etc.). Typing
+  # or pasting now would land in whatever is focused instead - stop rather
+  # than insert into the wrong window.
+  [[ $(active_address) == "$target" ]] || exit 0
 else
   # No origin window recorded: just let focus settle.
   sleep 0.15
