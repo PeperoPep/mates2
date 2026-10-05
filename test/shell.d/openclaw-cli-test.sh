@@ -16,10 +16,16 @@ cat >"$mock_bin/omarchy-pkg-present" <<'SH'
 #!/bin/bash
 [[ $1 == openclaw && -e $OMARCHY_TEST_ROOT/package-installed ]]
 SH
+# OMARCHY_TEST_PACKAGE_COMMAND makes the package bring an openclaw of its own,
+# the way the package before the seed did.
 cat >"$mock_bin/omarchy-pkg-add" <<'SH'
 #!/bin/bash
 printf 'pkg-add %s\n' "$*" >>"$OMARCHY_TEST_ROOT/events"
 touch "$OMARCHY_TEST_ROOT/package-installed"
+if [[ -n ${OMARCHY_TEST_PACKAGE_COMMAND:-} ]]; then
+  printf '#!/bin/bash\n' >"$OMARCHY_TEST_ROOT/usr-bin/openclaw"
+  chmod +x "$OMARCHY_TEST_ROOT/usr-bin/openclaw"
+fi
 SH
 # The user manager, as far as these tests need one: a service is active while
 # a marker says so, and enabled likewise. Stopping clears it, except for the
@@ -82,9 +88,11 @@ fi
 SH
 touch "$seed/openclaw.tgz"
 
-# Scratch copies of the actual scripts, with only the package's path swapped.
+# Scratch copies of the actual scripts, with only the package's path and
+# /usr/local/bin swapped.
+mkdir -p "$test_tmp/usr-local-bin"
 for script in bin/omarchy-install-openclaw-cli migrations/1790397381.sh; do
-  sed "s|/usr/share/openclaw|$seed|g" "$ROOT/$script" >"$mock_bin/${script##*/}"
+  sed -e "s|/usr/share/openclaw|$seed|g" -e "s|/usr/local/bin|$test_tmp/usr-local-bin|g" "$ROOT/$script" >"$mock_bin/${script##*/}"
 done
 mv "$mock_bin/1790397381.sh" "$test_tmp/migration.sh"
 chmod +x "$mock_bin/omarchy-install-openclaw-cli"
@@ -99,10 +107,21 @@ new_home() {
 }
 
 # PATH puts a directory ahead of ~/.local/bin the way Omarchy's does, where a
-# test can drop another openclaw.
-mkdir -p "$test_tmp/usr-bin"
+# test can drop another openclaw. The system's commands come from a directory
+# of their own, so an openclaw on the machine running this is never found.
+mkdir -p "$test_tmp/usr-bin" "$test_tmp/tools"
+for tool in bash cat chmod cp cut env grep head ln mkdir mv readlink realpath rm sed timeout touch true; do
+  ln -s "$(type -P "$tool")" "$test_tmp/tools/$tool"
+done
 run() {
-  HOME="$test_home" OMARCHY_TEST_ROOT="$test_tmp" PATH="$test_tmp/usr-bin:$mock_bin:$test_home/.local/bin:$PATH" \
+  HOME="$test_home" OMARCHY_TEST_ROOT="$test_tmp" MISE_SHIMS_DIR='' MISE_DATA_DIR='' XDG_DATA_HOME='' PATH="$test_tmp/usr-bin:$mock_bin:$test_home/.local/bin:$test_tmp/tools" \
+    "$@" >"$test_tmp/output" 2>&1
+}
+
+# omarchy update runs migrations on a fixed system PATH, without
+# /usr/local/bin, mise's shims or ~/.local/bin.
+run_update() {
+  HOME="$test_home" OMARCHY_TEST_ROOT="$test_tmp" MISE_SHIMS_DIR='' MISE_DATA_DIR='' XDG_DATA_HOME='' PATH="$mock_bin:$test_tmp/tools" \
     "$@" >"$test_tmp/output" 2>&1
 }
 
@@ -162,7 +181,7 @@ new_home shadowed
 printf '#!/bin/bash\n' >"$test_tmp/usr-bin/openclaw"
 chmod +x "$test_tmp/usr-bin/openclaw"
 run omarchy-install-openclaw-cli --now && fail "an openclaw earlier on PATH fails the install"
-grep -q "on PATH is $test_tmp/usr-bin/openclaw" "$test_tmp/output" || fail "an openclaw earlier on PATH is named" "$(cat "$test_tmp/output")"
+grep -q "on PATH at $test_tmp/usr-bin/openclaw" "$test_tmp/output" || fail "an openclaw earlier on PATH is named" "$(cat "$test_tmp/output")"
 [[ ! -e $test_home/.openclaw && ! -e $command ]] || fail "an openclaw earlier on PATH is refused before anything is touched"
 rm "$test_tmp/usr-bin/openclaw"
 run omarchy-install-openclaw-cli --now || fail "--now follows once nothing shadows the runtime" "$(cat "$test_tmp/output")"
@@ -178,6 +197,81 @@ pass "the runtime has to be the openclaw PATH finds, and anything else is refuse
 rm "$test_tmp/package-installed"
 run omarchy-install-openclaw-cli --check && fail "--check calls a runtime without its package installed"
 pass "--check needs the package too, so --now never has a password to ask for unseen"
+
+# An openclaw anywhere a session looks is refused, wherever it sits relative to
+# the runtime, because the order differs between a terminal, the desktop and
+# omarchy update.
+new_home elsewhere
+run omarchy-install-openclaw-cli --now || fail "--now sets OpenClaw up" "$(cat "$test_tmp/output")"
+printf '#!/bin/bash\n' >"$test_tmp/tools/openclaw"
+chmod +x "$test_tmp/tools/openclaw"
+run omarchy-install-openclaw-cli --check && fail "--check calls a runtime installed with another openclaw later on PATH"
+rm "$test_tmp/tools/openclaw"
+run omarchy-install-openclaw-cli --check || fail "--check follows once the runtime is the only openclaw"
+pass "an openclaw later on PATH than the runtime counts too"
+
+# omarchy update's PATH finds no openclaw at all. The runtime is still what a
+# session finds in ~/.local/bin, and what that PATH leaves out is still looked at.
+new_home update-path
+run_update omarchy-install-openclaw-cli --now || fail "--now finishes on omarchy update's PATH" "$(cat "$test_tmp/output")"
+[[ $(readlink -- "$command") == "$runtime" ]] || fail "--now links the command on omarchy update's PATH"
+run_update omarchy-install-openclaw-cli --check || fail "--check follows a finished install on omarchy update's PATH"
+rm "$command"
+run_update omarchy-install-openclaw-cli --check && fail "--check needs the command a session runs"
+run_update omarchy-install-openclaw-cli --now || fail "--now relinks the command on omarchy update's PATH" "$(cat "$test_tmp/output")"
+# mise's shims follow MISE_SHIMS_DIR, then MISE_DATA_DIR, then XDG_DATA_HOME,
+# and every session's PATH has the default directory whichever it is.
+for place in mise-shims mise-shims-dir mise-data-dir xdg-data-home default-shims-moved usr-local-bin; do
+  new_home "update-path-$place"
+  data_dirs=()
+  case $place in
+    mise-shims) other="$test_home/.local/share/mise/shims/openclaw" ;;
+    mise-shims-dir)
+      other="$test_home/shims/openclaw"
+      data_dirs=(MISE_SHIMS_DIR="$test_home/shims" MISE_DATA_DIR="$test_home/tools/mise")
+      ;;
+    mise-data-dir)
+      other="$test_home/tools/mise/shims/openclaw"
+      data_dirs=(MISE_DATA_DIR="$test_home/tools/mise")
+      ;;
+    xdg-data-home)
+      other="$test_home/data/mise/shims/openclaw"
+      data_dirs=(XDG_DATA_HOME="$test_home/data")
+      ;;
+    default-shims-moved)
+      other="$test_home/.local/share/mise/shims/openclaw"
+      data_dirs=(MISE_DATA_DIR="$test_home/tools/mise")
+      ;;
+    usr-local-bin) other="$test_tmp/usr-local-bin/openclaw" ;;
+  esac
+  mkdir -p "${other%/*}"
+  printf '#!/bin/bash\n' >"$other"
+  chmod +x "$other"
+  run_update env "${data_dirs[@]}" omarchy-install-openclaw-cli --now && fail "$other fails the install on omarchy update's PATH"
+  grep -q "on PATH at $other" "$test_tmp/output" || fail "$other is named on omarchy update's PATH" "$(cat "$test_tmp/output")"
+  [[ ! -e $test_home/.openclaw && ! -e $command && ! -s $events ]] || fail "$other is refused before anything is touched" "$(cat "$events")"
+  rm "$other"
+done
+pass "mise's shims, wherever its data directory is, and /usr/local/bin are looked at on omarchy update's PATH, which leaves them out"
+
+# A shim directory mise no longer uses is not where a session looks.
+new_home inactive-shims
+mkdir -p "$test_home/tools/mise/shims"
+printf '#!/bin/bash\n' >"$test_home/tools/mise/shims/openclaw"
+chmod +x "$test_home/tools/mise/shims/openclaw"
+run_update env MISE_SHIMS_DIR="$test_home/shims" MISE_DATA_DIR="$test_home/tools/mise" omarchy-install-openclaw-cli --now ||
+  fail "a shim directory MISE_SHIMS_DIR replaced does not block the install" "$(cat "$test_tmp/output")"
+pass "only the shim directory mise uses is looked at"
+
+# The package is installed after the first check, so an openclaw it brings is
+# only seen by the last one.
+new_home package-command
+run omarchy-install-openclaw-cli --now || fail "--now sets OpenClaw up" "$(cat "$test_tmp/output")"
+rm "$test_tmp/package-installed"
+OMARCHY_TEST_PACKAGE_COMMAND=1 run omarchy-install-openclaw-cli --now && fail "an openclaw the package brings fails the install"
+grep -q "is ready, but another openclaw is on PATH at $test_tmp/usr-bin/openclaw" "$test_tmp/output" || fail "an openclaw the package brings is named" "$(cat "$test_tmp/output")"
+rm "$test_tmp/usr-bin/openclaw"
+pass "an openclaw that appears during the install is caught before it reports success"
 
 # Upstream's installer rewrites a loaded gateway service to the copy it has
 # just made, so a gateway running another OpenClaw stops the seeding first.
@@ -331,3 +425,12 @@ touch "$test_tmp/package-installed"
 printf '#!/bin/bash\n' >"$command"
 run bash -euo pipefail "$test_tmp/migration.sh" && fail "a migration that cannot finish stays pending"
 pass "the migration moves a packaged OpenClaw to its runtime, and stays pending until it can"
+
+new_home migration-update
+touch "$test_tmp/package-installed"
+mkdir -p "$test_home/.config/systemd/user"
+printf 'ExecStart=/usr/bin/node /usr/lib/node_modules/openclaw/dist/index.js gateway --port 18789\n' >"$test_home/.config/systemd/user/openclaw-gateway.service"
+run_update bash -euo pipefail "$test_tmp/migration.sh" || fail "the migration finishes under omarchy update" "$(cat "$test_tmp/output")"
+grep -q "^install-cli " "$events" && [[ $(readlink -- "$command") == "$runtime" ]] ||
+  fail "the migration under omarchy update seeds the runtime and links the command" "$(cat "$events")"
+pass "the migration finishes under omarchy update, whose PATH has no ~/.local/bin"
