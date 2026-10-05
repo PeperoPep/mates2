@@ -9,6 +9,7 @@ if omarchy-pkg-present linux-t2 || [[ ${running_kernel,,} == *-t2* ]]; then
 fi
 
 limine_conf="${OMARCHY_KERNEL_LIMINE_CONF:-/etc/default/limine}"
+limine_boot_conf="${OMARCHY_KERNEL_LIMINE_BOOT_CONF:-/boot/limine.conf}"
 rebuild_marker="${OMARCHY_KERNEL_REBUILD_MARKER:-/var/lib/omarchy/migrations/1789325478}"
 kernel="linux-omarchy"
 
@@ -16,6 +17,22 @@ kernel="linux-omarchy"
 # the old kernel installed so it remains available if the new one cannot boot.
 # The new filename and marker also reach users who completed 1789095456.
 [[ ! -e $rebuild_marker ]] || exit 0
+
+# GRUB and systemd-boot installs have no Limine boot entries to rebuild, even
+# if limine-mkinitcpio happens to be installed. Like omarchy-upgrade-to-quattro,
+# treat /boot/limine.conf as the sign of a Limine boot setup, and test it as
+# root so a root-only /boot is not mistaken for a missing config. Classify the
+# path inside one privileged command so a sudo failure cannot look like absence.
+limine_boot_state="missing"
+if omarchy-cmd-present limine-mkinitcpio; then
+  limine_boot_state=$(sudo bash -c 'if [[ -f $1 ]]; then printf "%s\n" present; else printf "%s\n" missing; fi' _ "$limine_boot_conf")
+fi
+
+if [[ $limine_boot_state != "present" ]]; then
+  echo "This machine does not boot with Limine; leaving its kernel alone"
+  exit 0
+fi
+
 omarchy-pkg-add "$kernel" "$kernel-headers"
 
 # /etc/default/limine has priority over every drop-in, including old Dell
