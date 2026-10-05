@@ -50,6 +50,13 @@ Item {
   })
   property var layoutConfig: fallbackBarConfig.layout
   property string centerAnchor: ""
+  // A centerAnchor whose widget has left the center list — cloned, dragged to
+  // another region, disabled, its plugin removed — must not silently unpin the
+  // center: the group recenters and the hover reveal of the inactive
+  // indicators then slides every widget in it. Resolve the stale id to the
+  // widget of the same kind that is actually there. Only the raw value above
+  // round-trips to shell.json; everything that lays the center out reads this.
+  readonly property string resolvedCenterAnchor: BarModel.resolveCenterAnchor(layoutEntries("center"), centerAnchor)
   property bool requestedTransparent: false
   property bool useTransparentForeground: false
   property bool transparent: false
@@ -1530,7 +1537,7 @@ Item {
 
   function findCenterAnchorEntry() {
     var entries = root.layoutEntries("center")
-    var idx = root.entryIndex(entries, root.centerAnchor)
+    var idx = root.entryIndex(entries, root.resolvedCenterAnchor)
     return idx === -1 ? null : entries[idx]
   }
 
@@ -1548,7 +1555,7 @@ Item {
     id: centerRoot
 
     property var entries: root.layoutEntries("center")
-    readonly property bool hasAnchor: root.entryIndex(entries, root.centerAnchor) !== -1
+    readonly property bool hasAnchor: root.entryIndex(entries, root.resolvedCenterAnchor) !== -1
     readonly property var anchorEntry: root.findCenterAnchorEntry()
 
     Loader {
@@ -1584,7 +1591,7 @@ Item {
 
         ModuleList {
           visible: centerRoot.hasAnchor
-          entries: root.entriesBefore(centerRoot.entries, root.centerAnchor)
+          entries: root.entriesBefore(centerRoot.entries, root.resolvedCenterAnchor)
           region: "center"
           anchors.right: centerAnchorModule.left
           anchors.verticalCenter: centerAnchorModule.verticalCenter
@@ -1600,7 +1607,7 @@ Item {
 
         ModuleList {
           visible: centerRoot.hasAnchor
-          entries: root.entriesAfter(centerRoot.entries, root.centerAnchor)
+          entries: root.entriesAfter(centerRoot.entries, root.resolvedCenterAnchor)
           region: "center"
           anchors.left: centerAnchorModule.right
           anchors.verticalCenter: centerAnchorModule.verticalCenter
@@ -1636,7 +1643,7 @@ Item {
 
         ModuleList {
           visible: centerRoot.hasAnchor
-          entries: root.entriesBefore(centerRoot.entries, root.centerAnchor)
+          entries: root.entriesBefore(centerRoot.entries, root.resolvedCenterAnchor)
           region: "center"
           anchors.bottom: centerAnchorModule.top
           anchors.horizontalCenter: centerAnchorModule.horizontalCenter
@@ -1652,7 +1659,7 @@ Item {
 
         ModuleList {
           visible: centerRoot.hasAnchor
-          entries: root.entriesAfter(centerRoot.entries, root.centerAnchor)
+          entries: root.entriesAfter(centerRoot.entries, root.resolvedCenterAnchor)
           region: "center"
           anchors.top: centerAnchorModule.bottom
           anchors.horizontalCenter: centerAnchorModule.horizontalCenter
